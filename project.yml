@@ -1,0 +1,131 @@
+# XcodeGen spec — source of truth for the .xcodeproj (BUILD_PLAN §15).
+# Regenerate any time with:  xcodegen generate
+# NEVER hand-edit Reel.xcodeproj — it is disposable.
+name: Reel
+options:
+  bundleIdPrefix: com.neeklabs
+  deploymentTarget:
+    macOS: "15.0"                 # locked §4 — SCK mic + SCRecordingOutput need 15.0
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"                 # §5.0 — Swift-5 mode; SCK/CGEventTap fight Swift-6 concurrency
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    ENABLE_HARDENED_RUNTIME: YES         # §8.1 notarization
+    ENABLE_APP_SANDBOX: NO               # §4 direct distribution, non-sandboxed
+    CODE_SIGN_STYLE: Automatic
+    DEAD_CODE_STRIPPING: YES
+    SWIFT_STRICT_CONCURRENCY: minimal
+
+targets:
+  # ── The product ───────────────────────────────────────────────────────────
+  Reel:
+    type: application
+    platform: macOS
+    sources:
+      - path: Reel
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    entitlements:
+      path: Reel/Reel.entitlements
+      properties:
+        com.apple.security.device.audio-input: true   # hardened runtime needs this for mic
+    info:
+      path: Reel/Info.plist
+      properties:
+        NSMicrophoneUsageDescription: "Reel records your microphone so you can narrate your demos."
+        NSHumanReadableCopyright: "© 2026 Neek Labs"
+        LSMinimumSystemVersion: "15.0"
+        LSApplicationCategoryType: "public.app-category.developer-tools"
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        # NOTE: Screen Recording has NO Info.plist key — system-managed TCC (§5.1)
+
+  # ── M0 spike harness (§10) — one window, a button per spike ────────────────
+  ReelSpikes:
+    type: application
+    platform: macOS
+    sources:
+      - path: Reel                       # reuse real subsystem code, not throwaway
+        excludes:
+          - "App/**"                     # ReelSpikes brings its own @main
+          - "UI/**"
+      - path: Spikes
+    entitlements:
+      path: Spikes/Spikes.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
+    info:
+      path: Spikes/Info.plist
+      properties:
+        NSMicrophoneUsageDescription: "Spike harness: verifies mic capture via ScreenCaptureKit."
+        LSMinimumSystemVersion: "15.0"
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+
+  # ── SP-10 pure-math tests (logic tests — no app host, CLI-friendly) ────────
+  ReelTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+        excludes: ["Render/**"]
+      - path: Reel/CameraPath           # the moat's math, compiled straight in
+      - path: Reel/Model                # its dependency types
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+
+  # ── Headless Stage-2 render smoke test (logic test — no capture, no TCC) ────
+  # Proves solve → compose → export produces a valid, correct video from a synthetic source.
+  ReelRenderTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/Render
+      - path: Reel/CameraPath
+      - path: Reel/Model
+      - path: Reel/Compositing
+      - path: Reel/Export
+      - path: Reel/Preview
+      - path: Reel/Sample
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Reel:
+    build:
+      targets:
+        Reel: [run, archive, profile, analyze]   # NOT test — keeps SP-10 independent of app compile
+        ReelTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets: [ReelTests]
+    archive:
+      config: Release
+  ReelTests:
+    build:
+      targets: { ReelTests: [test] }
+    test:
+      config: Debug
+      targets: [ReelTests]
+  ReelSpikes:
+    build:
+      targets: { ReelSpikes: all }
+    run:
+      config: Debug
+  ReelRenderTests:
+    build:
+      targets: { ReelRenderTests: [test] }
+    test:
+      config: Debug
+      targets: [ReelRenderTests]
+      environmentVariables:
+        REEL_WRITE_SAMPLE: "1"     # renders ~/Desktop/DemoRecorder/sample_demo.mp4 to eyeball

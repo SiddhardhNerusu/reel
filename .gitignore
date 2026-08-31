@@ -1,0 +1,20 @@
+# XcodeGen output — regenerate with `xcodegen generate`
+*.xcodeproj
+*.xcworkspace
+
+# Xcode / build
+build/
+DerivedData/
+.build/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+
+# macOS
+.DS_Store
+
+# Local scratch recordings + rendered samples
+*.reelproj/
+Exports/
+sample_demo.*
+sample_frame_*.png
