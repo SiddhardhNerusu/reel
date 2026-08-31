@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import IOKit.hid
 import ScreenCaptureKit
 
 /// Orchestrates a full record → project → export round-trip (BUILD_PLAN §3). Owns the recorder
@@ -52,6 +53,13 @@ final class RecordingCoordinator: ObservableObject {
         // must never end up inside a take. Recording works without the grant; zoom just falls
         // back to a padded click-point box instead of the clicked element's rect.
         if !ElementResolver.isTrusted { ElementResolver.requestTrust() }
+        // Input Monitoring is a SEPARATE grant from Accessibility, and it is the one that lets a
+        // listen-only session tap observe events routed to OTHER apps (verified live 2026-08-31:
+        // with AX granted but not this, the timeline only contains clicks made while Reel itself
+        // was frontmost — auto-zoom has nothing to work with on a real demo).
+        if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
+            IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        }
     }
 
     // MARK: Record
