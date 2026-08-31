@@ -49,6 +49,14 @@ final class RecordingCoordinator: ObservableObject {
         } catch {
             hasAccess = false
         }
+        // No access: fire the REAL request once. Enumerating registers the app in the Screen
+        // Recording list only on a true first run — after a `tccutil reset` (or a stale/removed
+        // row) nothing re-registers it and the permission card dead-ends: the card's buttons only
+        // re-enumerate, and startRecording (which does request) is unreachable behind the card.
+        if !hasAccess, !didRequestScreenAccess {
+            didRequestScreenAccess = true
+            CapturePermissions.requestScreenRecordingAccess()
+        }
         // Ask for Accessibility + Input Monitoring here (launcher appear), not at record-start —
         // the system dialogs must never end up inside a take. Recording works without them; zoom
         // just falls back to a padded click-point box instead of the clicked element's rect.
@@ -64,6 +72,7 @@ final class RecordingCoordinator: ObservableObject {
         }
     }
     private var didPromptForInputGrants = false
+    private var didRequestScreenAccess = false
 
     // MARK: Record
 
