@@ -48,6 +48,10 @@ final class RecordingCoordinator: ObservableObject {
         } catch {
             hasAccess = false
         }
+        // Ask for Accessibility here (launcher appear), not at record-start — the system dialog
+        // must never end up inside a take. Recording works without the grant; zoom just falls
+        // back to a padded click-point box instead of the clicked element's rect.
+        if !ElementResolver.isTrusted { ElementResolver.requestTrust() }
     }
 
     // MARK: Record
@@ -59,7 +63,15 @@ final class RecordingCoordinator: ObservableObject {
         }
         _ = await CapturePermissions.requestMicrophoneAccess()
 
-        let filter = ShareableContent.filter(for: display, excluding: ownWindows)
+        // Keep Reel's own chrome (launcher, recording pill) out of the take. Callers may pass a
+        // specific list; otherwise resolve every window owned by this process.
+        var exclude = ownWindows
+        if exclude.isEmpty,
+           let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) {
+            let bundleID = Bundle.main.bundleIdentifier
+            exclude = content.windows.filter { $0.owningApplication?.bundleIdentifier == bundleID }
+        }
+        let filter = ShareableContent.filter(for: display, excluding: exclude)
         let url = Self.newProjectURL()
         // The .reelproj package must exist before AVAssetWriter opens raw.mov inside it (the writer
         // does not create parent directories).

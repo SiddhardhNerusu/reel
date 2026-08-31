@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import os
 
 /// Records the input-event timeline that drives auto-zoom (BUILD_PLAN §5.2).
 ///
@@ -38,8 +39,16 @@ final class EventTapRecorder {
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var watchdog: CFRunLoopTimer?
     private var thread: Thread?
     private var runLoop: CFRunLoop?
+
+    // P0.3 smoke found a ~45 s stretch where the tap delivered nothing and no tapDisabledBy*
+    // callback ever arrived to re-enable it. The watchdog below polls for that state; these
+    // counters make the failure visible in the .reelproj / debugger instead of silent.
+    private let log = Logger(subsystem: "com.neeklabs.reel", category: "eventtap")
+    private(set) var disabledNotices = 0      // tapDisabledBy* events received
+    private(set) var watchdogReenables = 0    // times the watchdog found the tap silently off
 
     // Cross-thread handshake (fixes the start/stop teardown race). `ready` is signaled by the tap
     // thread AFTER it publishes runLoop/runLoopSource and enables the tap — a happens-before
@@ -103,6 +112,19 @@ final class EventTapRecorder {
             self.runLoop = rl
             CFRunLoopAddSource(rl, source, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
+            // Watchdog: the system can disable a tap without a tapDisabledBy* callback ever
+            // reaching us (observed live 2026-08-31: 45 s of silently dropped events). Poll and
+            // revive; runs on this thread so it touches the tap with no cross-thread races.
+            let timer = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + 2, 2, 0, 0) { [weak self] _ in
+                guard let self, let tap = self.tap, self.isActive else { return }
+                if !CGEvent.tapIsEnabled(tap: tap) {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                    self.watchdogReenables += 1
+                    self.log.error("tap was silently disabled — watchdog re-enabled it (count \(self.watchdogReenables))")
+                }
+            }
+            self.watchdog = timer
+            CFRunLoopAddTimer(rl, timer, .commonModes)
             ready.signal()          // publish runLoop/source + barrier BEFORE the loop runs
             CFRunLoopRun()
             finished.signal()       // the loop has exited; buffers are safe to read
@@ -122,7 +144,9 @@ final class EventTapRecorder {
         if let runLoop, let source = runLoopSource {
             // Enqueue teardown ONTO the run loop so it works whether the loop is already running
             // or hasn't started yet (a bare CFRunLoopStop before the loop runs is a no-op).
+            let timer = watchdog
             CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue) {
+                if let timer { CFRunLoopTimerInvalidate(timer) }
                 CFRunLoopRemoveSource(runLoop, source, .commonModes)
                 CFRunLoopStop(runLoop)
             }
@@ -132,6 +156,7 @@ final class EventTapRecorder {
         axQueue.sync {}                              // drain any in-flight element resolutions
         tap = nil
         runLoopSource = nil
+        watchdog = nil
         runLoop = nil
         thread = nil
         isActive = false
@@ -140,6 +165,8 @@ final class EventTapRecorder {
     // Called ONLY on the tap thread. Keep it tiny (§5.2 — heavy work ⇒ tap disabled by timeout).
     private func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            disabledNotices += 1
+            log.error("tap disabled (\(type == .tapDisabledByTimeout ? "timeout" : "userInput"), notice \(self.disabledNotices)) — re-enabling")
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }

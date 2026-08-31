@@ -40,7 +40,7 @@ final class Exporter {
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw ExportError.noVideoTrack
         }
-        let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
 
         // Reader ----------------------------------------------------------
         let reader = try AVAssetReader(asset: asset)
@@ -52,9 +52,12 @@ final class Exporter {
         guard reader.canAdd(videoOut) else { throw ExportError.cannotCreateReader }
         reader.add(videoOut)
 
-        var audioOut: AVAssetReaderTrackOutput?
-        if let audioTrack {
-            let out = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil) // passthrough
+        // Audio shares the reader but MUST be pulled interleaved with video (see appendAudio
+        // below) — draining one output to EOF before touching the other loses the audio. The mix
+        // output folds system audio + mic (two source tracks) into one LPCM stream.
+        var audioOut: AVAssetReaderAudioMixOutput?
+        if !audioTracks.isEmpty {
+            let out = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: nil)
             if reader.canAdd(out) { reader.add(out); audioOut = out }
         }
 
@@ -81,7 +84,14 @@ final class Exporter {
 
         var audioIn: AVAssetWriterInput?
         if audioOut != nil {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil) // passthrough
+            // The mix output decodes to LPCM, so re-encode: AAC is what MP4/MOV expect.
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 192_000,
+            ])
+            input.expectsMediaDataInRealTime = false
             if writer.canAdd(input) { writer.add(input); audioIn = input }
         }
 
@@ -89,57 +99,91 @@ final class Exporter {
         guard writer.startWriting() else { throw writer.error ?? ExportError.cannotStart }
         writer.startSession(atSourceTime: .zero)
 
-        // Video pass (offline; spin on isReadyForMoreMediaData) ------------
-        var pool: CVPixelBufferPool? { adaptor.pixelBufferPool }
-        while let sample = videoOut.copyNextSampleBuffer() {
-            guard let imageBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
-            let srcT = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-            guard let t = remap.output(srcT) else {           // trimmed away or inside a cut
-                if srcT > remap.trimOut { break }
-                continue
+        // Feed the writer through requestMediaDataWhenReady, one serial queue per input. With
+        // multiple inputs this is the ONLY supported pattern: the writer re-arms an input's
+        // isReadyForMoreMediaData exclusively via these callbacks (it interleaves inputs
+        // internally), so any polling scheme — sequential passes or manual interleaving —
+        // deadlocks with readiness stuck false while the writer waits for the other track.
+        let compositor = self.compositor
+        let outputSize = settings.outputSize
+        let pool: CVPixelBufferPool? = adaptor.pixelBufferPool
+        let videoQueue = DispatchQueue(label: "com.neeklabs.reel.export.video")
+        let audioQueue = DispatchQueue(label: "com.neeklabs.reel.export.audio")
+        let group = DispatchGroup()
+
+        group.enter()
+        var videoFinished = false   // touched only on videoQueue
+        videoIn.requestMediaDataWhenReady(on: videoQueue) {
+            guard !videoFinished else { return }
+            func finishVideo() {
+                videoFinished = true
+                videoIn.markAsFinished()
+                group.leave()
             }
+            while videoIn.isReadyForMoreMediaData {
+                guard let sample = videoOut.copyNextSampleBuffer() else { finishVideo(); return }
+                guard let imageBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+                let srcT = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+                guard let t = remap.output(srcT) else {       // trimmed away or inside a cut
+                    if srcT > remap.trimOut { finishVideo(); return }
+                    continue
+                }
 
-            let src = CIImage(cvImageBuffer: imageBuffer)
-            let cam = camera.state(at: t)
-            let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t))
-            let composed = compositor.compose(source: src, sourceSize: sourceSize,
-                                              frame: frame, theme: project.theme, outputSize: settings.outputSize)
+                let src = CIImage(cvImageBuffer: imageBuffer)
+                let cam = camera.state(at: t)
+                let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t))
+                let composed = compositor.compose(source: src, sourceSize: sourceSize,
+                                                  frame: frame, theme: project.theme, outputSize: outputSize)
 
-            var pb: CVPixelBuffer?
-            if let pool { CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb) }
-            guard let outBuffer = pb else { continue }
-            compositor.render(composed, to: outBuffer, size: settings.outputSize)
-
-            while !videoIn.isReadyForMoreMediaData { usleep(500) }
-            adaptor.append(outBuffer, withPresentationTime: CMTime(seconds: t, preferredTimescale: 600))
-            if editedDuration > 0 { await progress?(min(1, t / editedDuration)) }
+                var pb: CVPixelBuffer?
+                if let pool { CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb) }
+                guard let outBuffer = pb else { continue }
+                compositor.render(composed, to: outBuffer, size: outputSize)
+                adaptor.append(outBuffer, withPresentationTime: CMTime(seconds: t, preferredTimescale: 600))
+                if editedDuration > 0 {
+                    let p = min(1, t / editedDuration)
+                    Task { @MainActor in progress?(p) }
+                }
+            }
         }
-        // A reader failure ends the loop early; don't finalize a truncated file as "success".
+
+        if let audioOut, let audioIn {
+            group.enter()
+            var audioFinished = false   // touched only on audioQueue
+            audioIn.requestMediaDataWhenReady(on: audioQueue) {
+                guard !audioFinished else { return }
+                func finishAudio() {
+                    audioFinished = true
+                    audioIn.markAsFinished()
+                    group.leave()
+                }
+                while audioIn.isReadyForMoreMediaData {
+                    guard let sample = audioOut.copyNextSampleBuffer() else { finishAudio(); return }
+                    let srcT = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+                    guard let t = remap.output(srcT) else {
+                        if srcT > remap.trimOut { finishAudio(); return }
+                        continue                              // trimmed away or inside a cut
+                    }
+                    guard let retimed = Self.retime(sample, by: t - srcT) else { continue }
+                    audioIn.append(retimed)
+                }
+            }
+        }
+
+        // Wait for both feeders; poll writer health so a failed writer surfaces as an error
+        // instead of an infinite wait (a failed writer stops calling the callbacks).
+        while group.wait(timeout: .now() + 1) == .timedOut {
+            if writer.status == .failed || reader.status == .failed {
+                writer.cancelWriting(); reader.cancelReading()
+                try? FileManager.default.removeItem(at: outputURL)
+                throw writer.error ?? reader.error ?? ExportError.cannotStart
+            }
+        }
+        // A reader failure ends the loops early; don't finalize a truncated file as "success".
         if reader.status == .failed {
             writer.cancelWriting(); reader.cancelReading()
             try? FileManager.default.removeItem(at: outputURL)
             throw reader.error ?? ExportError.cannotStart
-        }
-        videoIn.markAsFinished()
-
-        // Audio pass (passthrough, re-timed through the same remap so cuts stay in A/V sync) ----
-        if let audioOut, let audioIn {
-            while let sample = audioOut.copyNextSampleBuffer() {
-                let srcT = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-                guard let t = remap.output(srcT) else {
-                    if srcT > remap.trimOut { break }
-                    continue
-                }
-                guard let retimed = Self.retime(sample, by: t - srcT) else { continue }
-                while !audioIn.isReadyForMoreMediaData { usleep(500) }
-                audioIn.append(retimed)
-            }
-            if reader.status == .failed {
-                writer.cancelWriting(); reader.cancelReading()
-                try? FileManager.default.removeItem(at: outputURL)
-                throw reader.error ?? ExportError.cannotStart
-            }
-            audioIn.markAsFinished()
         }
 
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
