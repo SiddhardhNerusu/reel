@@ -49,18 +49,21 @@ final class RecordingCoordinator: ObservableObject {
         } catch {
             hasAccess = false
         }
-        // Ask for Accessibility here (launcher appear), not at record-start — the system dialog
-        // must never end up inside a take. Recording works without the grant; zoom just falls
-        // back to a padded click-point box instead of the clicked element's rect.
+        // Ask for Accessibility + Input Monitoring here (launcher appear), not at record-start —
+        // the system dialogs must never end up inside a take. Recording works without them; zoom
+        // just falls back to a padded click-point box instead of the clicked element's rect.
+        // AT MOST ONCE PER LAUNCH: checkAccess() re-runs on every app-foreground (scenePhase),
+        // and re-requesting each time makes the system dialog reappear on every focus change.
+        guard !didPromptForInputGrants else { return }
+        didPromptForInputGrants = true
         if !ElementResolver.isTrusted { ElementResolver.requestTrust() }
         // Input Monitoring is a SEPARATE grant from Accessibility, and it is the one that lets a
-        // listen-only session tap observe events routed to OTHER apps (verified live 2026-08-31:
-        // with AX granted but not this, the timeline only contains clicks made while Reel itself
-        // was frontmost — auto-zoom has nothing to work with on a real demo).
+        // listen-only session tap observe events routed to OTHER apps.
         if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted {
             IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
         }
     }
+    private var didPromptForInputGrants = false
 
     // MARK: Record
 
