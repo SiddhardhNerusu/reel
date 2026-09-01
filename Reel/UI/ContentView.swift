@@ -97,8 +97,20 @@ struct ContentView: View {
     private var recordingNote: some View {
         HStack(spacing: 10) {
             PulsingDot(size: 10)
-            Text("Recording — use the pill or \(AppSettings.hotkeyLabelKeys.joined()) to stop.")
+            Text("Recording — the pill, the menu bar, or \(AppSettings.hotkeyLabelKeys.joined()) all stop it.")
                 .font(RC.body).foregroundStyle(RC.ink2)
+            Spacer()
+            Button {
+                Task { await coordinator.stopRecording() }
+            } label: {
+                Text("Stop")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .frame(height: 30)
+                    .background(RC.live, in: RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
         .darkCard()

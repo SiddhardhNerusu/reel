@@ -31,11 +31,16 @@ enum ElementResolver {
         var out: AXUIElement?
         guard AXUIElementCopyElementAtPosition(systemWide, Float(p.x), Float(p.y), &out) == .success,
               let start = out else { return nil }
+        // The system-wide timeout does NOT carry over to the returned per-app elements — those
+        // default to 6 s per call, and a hung target app (verified live 2026-09-01: it serialized
+        // minutes of blocking on the resolve queue and froze stop()). Cap them too.
+        AXUIElementSetMessagingTimeout(start, 0.25)
         // Prefer the deepest element that reports a frame; walk up a couple hops if it reports none.
         var element = start
         for _ in 0..<3 {
             if let rect = frame(of: element) { return rect }
             guard let up = parent(of: element) else { break }
+            AXUIElementSetMessagingTimeout(up, 0.25)
             element = up
         }
         return nil

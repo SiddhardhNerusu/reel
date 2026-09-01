@@ -17,8 +17,13 @@ final class RecordingPillController {
     func show() {
         guard panel == nil else { return }
         let view = NSHostingView(rootView: RecordingPillView(coordinator: coordinator))
-        view.frame.size = view.fittingSize
-        let p = NSPanel(contentRect: NSRect(origin: .zero, size: view.fittingSize),
+        // fittingSize can come back .zero for hosted SwiftUI before first layout — an invisible
+        // 0×0 panel was exactly the "no way to stop it" bug (2026-09-01). Fall back to the
+        // pill's designed size.
+        var size = view.fittingSize
+        if size.width < 100 || size.height < 30 { size = NSSize(width: 280, height: 62) }
+        view.frame = NSRect(origin: .zero, size: size)
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         p.contentView = view

@@ -3,6 +3,7 @@
 # NEVER hand-edit Reel.xcodeproj — it is disposable.
 name: Reel
 options:
+  postGenCommand: scripts/fix_workspace_settings.sh
   bundleIdPrefix: com.neeklabs
   deploymentTarget:
     macOS: "15.0"                 # locked §4 — SCK mic + SCRecordingOutput need 15.0

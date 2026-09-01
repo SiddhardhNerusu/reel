@@ -29,6 +29,7 @@ final class EventTapRecorder {
     /// Accessibility is trusted.
     private let axLock = NSLock()
     private var resolvedRects: [Int: CGRect] = [:]
+    private var axPending = 0   // guarded by axLock — resolutions queued but not finished
     private let axQueue = DispatchQueue(label: "com.neeklabs.reel.ax", qos: .userInitiated)
     /// Set true (after the AX grant) to resolve clicked-element rects for smarter zoom targeting.
     var resolvesElements = false
@@ -153,7 +154,11 @@ final class EventTapRecorder {
             CFRunLoopWakeUp(runLoop)
         }
         _ = finishedSem.wait(timeout: .now() + 2)   // the run loop exited (bounded)
-        axQueue.sync {}                              // drain any in-flight element resolutions
+        // Drain in-flight element resolutions with a BOUND — never block stop() behind a hung
+        // target app's AX server (each queued resolve can eat its full messaging timeout).
+        let drained = DispatchSemaphore(value: 0)
+        axQueue.async { drained.signal() }
+        _ = drained.wait(timeout: .now() + 1.5)      // missed rects just fall back to click points
         tap = nil
         runLoopSource = nil
         watchdog = nil
@@ -182,9 +187,20 @@ final class EventTapRecorder {
             cursor.append(RawCursor(t: t, location: loc))
             // Resolve WHICH element was clicked, off the tap thread (AX IPC can be slow).
             if resolvesElements {
+                // Cap the backlog: a hung target app makes each resolve eat its full timeout;
+                // unbounded queueing turned stop() into a minutes-long wait (2026-09-01 freeze).
+                axLock.lock()
+                let backlog = axPending
+                if backlog < 8 { axPending += 1 }
+                axLock.unlock()
+                guard backlog < 8 else { break }
                 axQueue.async { [weak self] in
-                    guard let self, let rect = ElementResolver.elementRect(atGlobalPoint: loc) else { return }
-                    self.axLock.lock(); self.resolvedRects[idx] = rect; self.axLock.unlock()
+                    guard let self else { return }
+                    let rect = ElementResolver.elementRect(atGlobalPoint: loc)
+                    self.axLock.lock()
+                    self.axPending -= 1
+                    if let rect { self.resolvedRects[idx] = rect }
+                    self.axLock.unlock()
                 }
             }
         case .scrollWheel:
