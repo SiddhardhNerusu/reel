@@ -44,6 +44,8 @@ struct ReelProject: Codable, Equatable {
     var cursorSmoothing: Double? = nil
     /// Click ripple rings on/off.
     var clickRipples: Bool? = nil
+    /// Burned-in captions on/off (lines cached in captions.json).
+    var captionsEnabled: Bool? = nil
 
     var effectiveTrimOut: Double { trimOut < 0 ? duration : min(trimOut, duration) }
     var editedDuration: Double { max(0, effectiveTrimOut - trimIn) }
@@ -73,6 +75,8 @@ struct ReelDocument: Identifiable {
     var events: [InputEvent]
     var cursor: [CursorSample]
     var window: [WindowSample]
+    /// On-device transcription cache (raw timeline). Empty until the user enables captions.
+    var captions: [CaptionLine] = []
 
     static let rawMovieName = "raw.mov"
 
@@ -89,6 +93,9 @@ struct ReelDocument: Identifiable {
         try enc.encode(events).write(to: url.appendingPathComponent("events.json"))
         try enc.encode(cursor).write(to: url.appendingPathComponent("cursor.json"))
         try enc.encode(window).write(to: url.appendingPathComponent("window.json"))
+        if !captions.isEmpty {
+            try enc.encode(captions).write(to: url.appendingPathComponent("captions.json"))
+        }
     }
 
     // Read -----------------------------------------------------------------
@@ -111,6 +118,8 @@ struct ReelDocument: Identifiable {
         let events = try load("events.json", [InputEvent].self, optional: true) ?? []
         let cursor = try load("cursor.json", [CursorSample].self, optional: true) ?? []
         let window = try load("window.json", [WindowSample].self, optional: true) ?? []
-        return ReelDocument(url: url, project: project, events: events, cursor: cursor, window: window)
+        let captions = try load("captions.json", [CaptionLine].self, optional: true) ?? []
+        return ReelDocument(url: url, project: project, events: events, cursor: cursor,
+                            window: window, captions: captions)
     }
 }

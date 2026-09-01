@@ -40,6 +40,7 @@ targets:
       path: Reel/Info.plist
       properties:
         NSMicrophoneUsageDescription: "Reel records your microphone so you can narrate your demos."
+        NSSpeechRecognitionUsageDescription: "Reel transcribes your narration on this Mac to burn in captions. Nothing is uploaded."
         NSHumanReadableCopyright: "© 2026 Neek Labs"
         LSMinimumSystemVersion: "15.0"
         LSApplicationCategoryType: "public.app-category.developer-tools"

@@ -13,6 +13,7 @@ enum TrackBuilder {
                       events: [InputEvent],
                       cursor: [CursorSample],
                       cuts: [ClosedRange<Double>] = [],
+                      captions: [CaptionLine] = [],
                       config: SolverConfig? = nil) -> RenderTracks {
         // One remap handles trim boundaries AND auto-cut idle spans (cuts default empty ⇒ trim only).
         let remap = TimeRemap(trimIn: project.trimIn, trimOut: project.effectiveTrimOut, cuts: cuts)
@@ -43,7 +44,16 @@ enum TrackBuilder {
 
         let ripples = (project.clickRipples ?? true) ? RippleTrack(events: clippedEvents)
                                                      : RippleTrack(events: [])
+
+        // Captions ride the same remap so they stay glued to the voice across trims and cuts.
+        let clippedCaptions: [CaptionLine] = (project.captionsEnabled ?? false) ? captions.compactMap { line in
+            guard let ns = remap.output(line.start) else { return nil }
+            let ne = remap.output(line.end) ?? (ns + (line.end - line.start))
+            return CaptionLine(start: ns, end: max(ne, ns + 0.2), text: line.text)
+        } : []
+
         return RenderTracks(camera: camera, cursor: cursorTrack, ripples: ripples,
-                            cursorScale: project.cursorScale ?? 1.4)
+                            cursorScale: project.cursorScale ?? 1.4,
+                            captions: CaptionTrack(lines: clippedCaptions))
     }
 }

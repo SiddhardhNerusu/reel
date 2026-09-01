@@ -126,6 +126,9 @@ struct EditorView: View {
                 RC.stage
                 ZStack {
                     PlayerLayerView(player: model.player)
+                    if model.state.aspect == .r9x16 || model.state.aspect == .r4x5 {
+                        SafeAreaGuides()
+                    }
                     ZoomTargetOverlay(model: model)
                 }
                 .frame(width: w, height: h)
@@ -261,6 +264,7 @@ struct InspectorView: View {
     @AppStorage("inspector.frame") private var frameOpen = false
     @AppStorage("inspector.background") private var backgroundOpen = false
     @AppStorage("inspector.audio") private var audioOpen = false
+    @AppStorage("inspector.captions") private var captionsOpen = false
 
     var body: some View {
         ScrollView {
@@ -343,6 +347,26 @@ struct InspectorView: View {
                                 .strokeBorder(RC.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
                     }
                 }
+                section("Captions", summary: captionSummary, isOpen: $captionsOpen) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Burn in captions").font(RC.body).foregroundStyle(RC.ink)
+                            Spacer()
+                            if model.isTranscribing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                ReelToggle(isOn: Binding(
+                                    get: { model.state.captionsEnabled },
+                                    set: { model.setCaptions(enabled: $0) }))
+                            }
+                        }
+                        Text(model.captionError
+                             ?? "Transcribed on this Mac — nothing is uploaded, no credits.")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(model.captionError == nil ? RC.ink4 : RC.live)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 section("Audio", summary: audioSummary, isOpen: $audioOpen) {
                     HStack {
                         Text("Remove silence").font(RC.body).foregroundStyle(RC.ink)
@@ -367,6 +391,12 @@ struct InspectorView: View {
 
     private var backgroundSummary: String {
         ThemePresets.all.first { $0.background == model.state.background }?.name.lowercased() ?? "custom"
+    }
+
+    private var captionSummary: String {
+        if model.isTranscribing { return "transcribing…" }
+        if model.state.captionsEnabled { return "\(model.doc.captions.count) lines" }
+        return "off"
     }
 
     private var audioSummary: String {
@@ -714,5 +744,49 @@ struct HatchPattern: Shape {
             x += step
         }
         return p
+    }
+}
+
+
+/// Platform safe-area guides for vertical formats (preview-only, never exported): the bands
+/// Reels/Shorts/TikTok cover with their own UI. Keep zoom targets and captions out of them.
+struct SafeAreaGuides: View {
+    var body: some View {
+        GeometryReader { geo in
+            let h = geo.size.height, w = geo.size.width
+            ZStack(alignment: .top) {
+                // Top band (~11%): username / camera chrome.
+                guideBand(y: 0, height: h * 0.11, width: w, label: "platform UI")
+                // Bottom band (~18%): caption field, actions, music line.
+                guideBand(y: h * 0.82, height: h * 0.18, width: w, label: "platform UI")
+                // Right rail (~13%): like/comment/share stack.
+                Rectangle()
+                    .fill(Color.black.opacity(0.18))
+                    .frame(width: w * 0.13, height: h * 0.60)
+                    .offset(x: w * 0.87, y: h * 0.20)
+                    .overlay(alignment: .center) {
+                        Text("actions")
+                            .font(RC.mono(8)).foregroundStyle(RC.ink3)
+                            .rotationEffect(.degrees(-90))
+                            .offset(x: w * 0.87 - w / 2 + w * 0.065, y: 0)
+                    }
+            }
+            .overlay(
+                Rectangle()
+                    .strokeBorder(RC.ink.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .padding(.top, h * 0.11)
+                    .padding(.bottom, h * 0.18)
+                    .padding(.trailing, w * 0.13)
+            )
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func guideBand(y: CGFloat, height: CGFloat, width: CGFloat, label: String) -> some View {
+        Rectangle()
+            .fill(Color.black.opacity(0.18))
+            .frame(width: width, height: height)
+            .overlay(Text(label).font(RC.mono(8)).foregroundStyle(RC.ink3))
+            .offset(y: y)
     }
 }

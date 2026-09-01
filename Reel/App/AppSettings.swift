@@ -15,6 +15,15 @@ enum AppSettings {
         get { d.object(forKey: "hideDesktop") as? Bool ?? true }
         set { d.set(newValue, forKey: "hideDesktop") }
     }
+    static var captureMicrophone: Bool {
+        get { d.object(forKey: "captureMic") as? Bool ?? true }
+        set { d.set(newValue, forKey: "captureMic") }
+    }
+    static var captureSystemAudio: Bool {
+        get { d.object(forKey: "captureSystemAudio") as? Bool ?? true }
+        set { d.set(newValue, forKey: "captureSystemAudio") }
+    }
+
     /// Start/stop hotkey (default ⌘⇧R).
     static var hotkeyKeyCode: UInt32 {
         get { d.object(forKey: "hotkeyCode") as? UInt32 ?? UInt32(kVK_ANSI_R) }

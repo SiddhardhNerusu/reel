@@ -44,4 +44,6 @@ struct RenderTracks {
     let ripples: RippleTrack
     /// Drawn cursor size multiplier (Darkroom §2.4 Cursor · Size).
     var cursorScale: Double = 1.4
+    /// Burned-in caption lines, already remapped to the edited timeline.
+    var captions: CaptionTrack = .empty
 }

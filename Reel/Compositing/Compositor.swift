@@ -43,6 +43,10 @@ final class Compositor: @unchecked Sendable {
         var cursor: CGPoint?          // source pixels, top-left; nil ⇒ no cursor this frame
         var ripples: [RippleTrack.Ripple] = []   // click ripples active this frame (source px)
         var cursorScale: Double = 1   // drawn cursor size multiplier (1.0…2.0, Darkroom §2.4)
+        var caption: String?          // burned-in caption line active this frame
+        /// Trial watermark chip (EXPORT ONLY — the one sanctioned preview/export divergence,
+        /// because the watermark IS the trial mechanic, brief §2.5).
+        var watermark = false
     }
 
     /// Compose one output frame. `outputSize` is the final canvas size in pixels.
@@ -83,8 +87,51 @@ final class Compositor: @unchecked Sendable {
             }
         }
 
+        // 6) Burned-in caption (Shorts-ready story) — bottom-center, inside platform safe areas.
+        if let caption = frame.caption, !caption.isEmpty {
+            let fontSize = max(18, outputSize.height * 0.030)
+            if let chip = captionImage(caption, fontSize: fontSize) {
+                let ext = chip.extent
+                let x = (outputSize.width - ext.width) / 2
+                // Vertical formats keep clear of the Reels/Shorts UI band (~18% bottom).
+                let bottomInset = outputSize.height * (outputSize.height > outputSize.width ? 0.20 : 0.08)
+                image = chip.transformed(by: CGAffineTransform(translationX: x, y: bottomInset))
+                    .composited(over: image)
+            }
+        }
+
+        // 7) Trial watermark, bottom-right corner.
+        if frame.watermark, let wm = watermarkImage {
+            let ext = wm.extent
+            let margin = outputSize.height * 0.025
+            image = wm.transformed(by: CGAffineTransform(
+                translationX: outputSize.width - ext.width - margin, y: margin))
+                .composited(over: image)
+        }
+
         return image.cropped(to: outRect)
     }
+
+    // Caption chips are rendered pixels cached per (text, size) — a line stays on screen for
+    // dozens of frames; re-rendering CoreText each frame would waste the preview budget.
+    private let captionLock = NSLock()
+    private var captionKey = ""
+    private var captionCache: CIImage?
+
+    private func captionImage(_ text: String, fontSize: CGFloat) -> CIImage? {
+        let key = "\(text)|\(Int(fontSize))"
+        captionLock.lock()
+        if captionKey == key, let cached = captionCache { captionLock.unlock(); return cached }
+        captionLock.unlock()
+        let img = TextSprite.caption(text, fontSize: fontSize)
+        captionLock.lock()
+        captionKey = key
+        captionCache = img
+        captionLock.unlock()
+        return img
+    }
+
+    private lazy var watermarkImage: CIImage? = TextSprite.watermark()
 
     /// Render an image into a pixel buffer (export path). Pass an sRGB color space explicitly or
     /// colors shift (§5.4).

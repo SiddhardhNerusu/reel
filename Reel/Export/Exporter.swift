@@ -13,6 +13,8 @@ final class Exporter {
         var fps: Int = 60
         var codec: AVVideoCodecType = .h264
         var fileType: AVFileType = .mp4
+        /// Trial watermark chip (unlicensed builds — brief §2.5: the watermark IS the trial).
+        var watermark = false
     }
 
     enum ExportError: Error { case noVideoTrack, cannotCreateReader, cannotCreateWriter, cannotStart }
@@ -131,7 +133,11 @@ final class Exporter {
 
                 let src = CIImage(cvImageBuffer: imageBuffer)
                 let cam = camera.state(at: t)
-                let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t), cursorScale: tracks.cursorScale)
+                let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t),
+                                             ripples: ripples.active(at: t),
+                                             cursorScale: tracks.cursorScale,
+                                             caption: tracks.captions.line(at: t),
+                                             watermark: settings.watermark)
                 let composed = compositor.compose(source: src, sourceSize: sourceSize,
                                                   frame: frame, theme: project.theme, outputSize: outputSize)
 
@@ -247,7 +253,10 @@ final class Exporter {
             }
             let src = CIImage(cgImage: cg)
             let cam = camera.state(at: t)
-            let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t), cursorScale: tracks.cursorScale)
+            let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t),
+                                             ripples: ripples.active(at: t),
+                                             cursorScale: tracks.cursorScale,
+                                             caption: tracks.captions.line(at: t))
             let composed = compositor.compose(source: src, sourceSize: sourceSize,
                                               frame: frame, theme: project.theme, outputSize: size)
             guard let outCG = compositor.ciContext.createCGImage(

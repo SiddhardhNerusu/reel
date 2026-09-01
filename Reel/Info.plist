@@ -26,5 +26,7 @@
 	<string>© 2026 Neek Labs</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Reel records your microphone so you can narrate your demos.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Reel transcribes your narration on this Mac to burn in captions. Nothing is uploaded.</string>
 </dict>
 </plist>

@@ -55,7 +55,13 @@ struct ExportSheet: View {
             HStack {
                 Text(model.exportDurationLabel).font(RC.mono(11)).foregroundStyle(RC.ink3)
                 Spacer()
+                Text(dims).font(RC.mono(11)).foregroundStyle(RC.ink3)
                 Text(model.exportEstimate).font(RC.mono(11)).foregroundStyle(RC.ink3)
+            }
+            if !AppSettings.isLicensed {
+                Text("Trial adds a small “Made with Reel” chip — a licence removes it, forever.")
+                    .font(.system(size: 10.5)).foregroundStyle(RC.ink4)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Button("Export Video") {
@@ -68,6 +74,11 @@ struct ExportSheet: View {
             .buttonStyle(.reelPrimaryLarge)
             .frame(maxWidth: .infinity)
         }
+    }
+
+    private var dims: String {
+        let sz = model.exportSize()
+        return "\(Int(sz.width))×\(Int(sz.height))"
     }
 
     private func chipGroup(_ name: String, items: [String], selected: String,

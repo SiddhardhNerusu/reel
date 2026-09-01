@@ -88,6 +88,7 @@ struct ContentView: View {
             sourcePicker
             if sourceKind == .window { windowPicker }
             recordButton
+            audioRow
             statusStrip
             if !recents.isEmpty { recentsSection }
         }
@@ -194,6 +195,38 @@ struct ContentView: View {
         .hoverRaise(-2)
         .disabled(!canStart)
         .opacity(canStart ? 1 : 0.5)
+    }
+
+    /// Quiet audio toggles (LAUNCH_PLAN P1.5 — capture was wired, the choice never was).
+    @State private var micOn = AppSettings.captureMicrophone
+    @State private var sysAudioOn = AppSettings.captureSystemAudio
+
+    private var audioRow: some View {
+        HStack(spacing: 10) {
+            audioChip(icon: "mic.fill", label: "Microphone", on: $micOn) { AppSettings.captureMicrophone = $0 }
+            audioChip(icon: "speaker.wave.2.fill", label: "System audio", on: $sysAudioOn) { AppSettings.captureSystemAudio = $0 }
+            Spacer()
+        }
+    }
+
+    private func audioChip(icon: String, label: String, on: Binding<Bool>,
+                           save: @escaping (Bool) -> Void) -> some View {
+        Button {
+            on.wrappedValue.toggle()
+            save(on.wrappedValue)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: on.wrappedValue ? icon : icon.replacingOccurrences(of: ".fill", with: ".slash.fill"))
+                    .font(.system(size: 10.5))
+                Text(label).font(.system(size: 11.5, weight: .medium))
+            }
+            .foregroundStyle(on.wrappedValue ? RC.ink2 : RC.ink4)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(on.wrappedValue ? RC.raised : .clear, in: Capsule())
+            .overlay(Capsule().stroke(on.wrappedValue ? RC.hairline : RC.hairlineSoft, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var canStart: Bool {

@@ -25,6 +25,7 @@ final class EditorModel: ObservableObject {
         var shadowLevel: Int              // 0 S · 1 M · 2 L
         var background: BackgroundStyle
         var removeSilence: Bool
+        var captionsEnabled: Bool
         var overrides: [CameraOverride]
         var title: String?
     }
@@ -45,6 +46,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var isPlaying: Bool = false
     @Published private(set) var filmstrip: [CGImage] = []
     @Published private(set) var silenceCutsPreview: [ClosedRange<Double>] = []
+    @Published private(set) var isTranscribing = false
+    @Published private(set) var captionError: String?
 
     // MARK: Export (Darkroom §2.5 sheet)
 
@@ -79,6 +82,7 @@ final class EditorModel: ObservableObject {
                                shadowLevel: shadowLevel,
                                background: p.theme.background,
                                removeSilence: p.autoRemoveSilence,
+                               captionsEnabled: p.captionsEnabled ?? false,
                                overrides: p.overrides,
                                title: p.title)
         addTimeObserver()
@@ -179,6 +183,39 @@ final class EditorModel: ObservableObject {
 
     var silenceSavings: Double {
         silenceCutsPreview.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
+    }
+
+    // MARK: Captions (on-device, cached in captions.json)
+
+    /// Toggle handler: first enable transcribes once (on-device) and caches the lines.
+    func setCaptions(enabled: Bool) {
+        pushUndo()
+        state.captionsEnabled = enabled
+        guard enabled, doc.captions.isEmpty, !isTranscribing else { return }
+        isTranscribing = true
+        captionError = nil
+        let url = doc.rawMovieURL
+        Task { [weak self] in
+            do {
+                let words = try await AudioTranscriber.words(from: url)
+                let lines = CaptionTrack.group(words: words)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.doc.captions = lines
+                    self.isTranscribing = false
+                    if lines.isEmpty { self.captionError = "No speech found in this take." }
+                    self.save()
+                    Task { await self.rebuildPreview() }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isTranscribing = false
+                    self.captionError = "Captions need Speech permission — grant it in System Settings."
+                    self.state.captionsEnabled = false
+                }
+            }
+        }
     }
 
     // MARK: Zoom segments (§2.4 zoom track)
@@ -288,6 +325,7 @@ final class EditorModel: ObservableObject {
         p.cursorScale = state.cursorScale
         p.cursorSmoothing = state.cursorSmoothing
         p.clickRipples = state.clickRipples
+        p.captionsEnabled = state.captionsEnabled
         return p
     }
 
@@ -336,7 +374,7 @@ final class EditorModel: ObservableObject {
         let project = editedProject()
         let outputSize = Self.previewSize(for: RecordingCoordinator.outputSize(for: project))
         let tracks = TrackBuilder.build(project: project, events: doc.events, cursor: doc.cursor,
-                                        config: solverConfig)
+                                        captions: doc.captions, config: solverConfig)
         let asset = AVURLAsset(url: doc.rawMovieURL)
         do {
             let wasPlaying = player.rate > 0
@@ -356,12 +394,15 @@ final class EditorModel: ObservableObject {
 
     // MARK: Export (§2.5)
 
-    /// Output pixel size for the chosen resolution chip (fit within the cap, keep aspect).
+    /// Output pixel size for the chosen resolution chip. The cap applies to the SHORT side so
+    /// vertical exports land on the exact platform sizes (9:16 · 1080p ⇒ 1080×1920 — what Reels,
+    /// Shorts, TikTok and App Store previews expect), and 16:9 · 1080p ⇒ 1920×1080.
     func exportSize() -> CGSize {
         let full = RecordingCoordinator.outputSize(for: editedProject())
-        let capH: Double = exportFormat == .gif ? 1080
+        let cap: Double = exportFormat == .gif ? 1080
             : (exportResolution == .r1080 ? 1080 : (exportResolution == .r1440 ? 1440 : 2160))
-        let scale = min(1, capH / max(1, full.height))
+        let short = min(full.width, full.height)
+        let scale = min(1, cap / max(1, short))
         return CGSize(width: (full.width * scale / 2).rounded(.down) * 2,
                       height: (full.height * scale / 2).rounded(.down) * 2)
     }
@@ -397,7 +438,7 @@ final class EditorModel: ObservableObject {
                                        duration: project.editedDuration, silence: silence)
         }
         let tracks = TrackBuilder.build(project: project, events: doc.events, cursor: doc.cursor,
-                                        cuts: cuts, config: solverConfig)
+                                        cuts: cuts, captions: doc.captions, config: solverConfig)
         let exporter = Exporter(compositor: compositor)
         let outDir = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Reel", isDirectory: true)
@@ -413,12 +454,14 @@ final class EditorModel: ObservableObject {
             case .mp4:
                 try await exporter.exportVideo(document: editedDoc(), tracks: tracks, cuts: cuts, to: out,
                                                settings: .init(outputSize: exportSize(), fps: exportFPS,
-                                                               codec: .h264, fileType: .mp4),
+                                                               codec: .h264, fileType: .mp4,
+                                                               watermark: !AppSettings.isLicensed),
                                                progress: onProgress)
             case .prores:
                 try await exporter.exportVideo(document: editedDoc(), tracks: tracks, cuts: cuts, to: out,
                                                settings: .init(outputSize: exportSize(), fps: exportFPS,
-                                                               codec: .proRes422, fileType: .mov),
+                                                               codec: .proRes422, fileType: .mov,
+                                                               watermark: !AppSettings.isLicensed),
                                                progress: onProgress)
             }
             exportedURL = out

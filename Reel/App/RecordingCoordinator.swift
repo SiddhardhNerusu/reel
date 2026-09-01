@@ -120,6 +120,8 @@ final class RecordingCoordinator: ObservableObject {
 
         let filter: SCContentFilter
         var config = ScreenRecorder.Config()
+        config.captureMicrophone = AppSettings.captureMicrophone
+        config.captureSystemAudio = AppSettings.captureSystemAudio
         switch source {
         case let .display(d):
             filter = ShareableContent.filter(for: d, excluding: exclude)
