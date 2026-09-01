@@ -131,7 +131,7 @@ final class Exporter {
 
                 let src = CIImage(cvImageBuffer: imageBuffer)
                 let cam = camera.state(at: t)
-                let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t))
+                let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t), cursorScale: tracks.cursorScale)
                 let composed = compositor.compose(source: src, sourceSize: sourceSize,
                                                   frame: frame, theme: project.theme, outputSize: outputSize)
 
@@ -247,7 +247,7 @@ final class Exporter {
             }
             let src = CIImage(cgImage: cg)
             let cam = camera.state(at: t)
-            let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t))
+            let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: t), ripples: ripples.active(at: t), cursorScale: tracks.cursorScale)
             let composed = compositor.compose(source: src, sourceSize: sourceSize,
                                               frame: frame, theme: project.theme, outputSize: size)
             guard let outCG = compositor.ciContext.createCGImage(

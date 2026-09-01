@@ -27,7 +27,8 @@ enum PreviewComposition {
             let clamped = max(0, t)
             let cam = camera.state(at: clamped)
             let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: clamped),
-                                         ripples: ripples.active(at: clamped))
+                                         ripples: ripples.active(at: clamped),
+                                         cursorScale: tracks.cursorScale)
             let image = compositor.compose(source: request.sourceImage, sourceSize: sourceSize,
                                            frame: frame, theme: project.theme, outputSize: outputSize)
             request.finish(with: image, context: compositor.ciContext)

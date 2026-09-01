@@ -15,6 +15,11 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         var captureSystemAudio: Bool = true
         var captureMicrophone: Bool = true
         var codec: AVVideoCodecType = .h264
+        /// Crop to this rect (DISPLAY-LOCAL points, top-left) — area capture (LAUNCH_PLAN P1.2).
+        var sourceRect: CGRect? = nil
+        /// Override the geometry snapshot (area capture passes the GLOBAL rect so the event
+        /// mapping subtracts the right origin; the filter's contentRect is the whole display).
+        var geometryOverride: GeometrySnapshot? = nil
     }
 
     struct Result {
@@ -82,7 +87,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
         // Geometry snapshot (§5.2) — pixel size = points × pointPixelScale (Retina).
         let scale = Double(filter.pointPixelScale)
-        let geo = GeometrySnapshot.make(contentRect: filter.contentRect, pointPixelScale: scale)
+        let geo = config.geometryOverride
+            ?? GeometrySnapshot.make(contentRect: filter.contentRect, pointPixelScale: scale)
         self.geometry = geo
         self.outputURL = outputURL
         didFinalize = false
@@ -100,6 +106,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         let sc = SCStreamConfiguration()
         sc.width = geo.sourceWidth
         sc.height = geo.sourceHeight
+        if let crop = config.sourceRect { sc.sourceRect = crop }
         sc.pixelFormat = kCVPixelFormatType_32BGRA
         sc.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(config.fpsCap))
         sc.queueDepth = 6

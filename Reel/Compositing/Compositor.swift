@@ -42,6 +42,7 @@ final class Compositor: @unchecked Sendable {
         var camera: CameraState
         var cursor: CGPoint?          // source pixels, top-left; nil ⇒ no cursor this frame
         var ripples: [RippleTrack.Ripple] = []   // click ripples active this frame (source px)
+        var cursorScale: Double = 1   // drawn cursor size multiplier (1.0…2.0, Darkroom §2.4)
     }
 
     /// Compose one output frame. `outputSize` is the final canvas size in pixels.
@@ -77,7 +78,8 @@ final class Compositor: @unchecked Sendable {
                 cursor, camera: frame.camera, sourceSize: sourceSize,
                 contentRect: content, outputSize: outputSize)
             if content.insetBy(dx: -2, dy: -2).contains(outPtTL) {
-                image = cursorLayer(atTopLeft: outPtTL, outputSize: outputSize).composited(over: image)
+                image = cursorLayer(atTopLeft: outPtTL, outputSize: outputSize,
+                                    scale: frame.cursorScale).composited(over: image)
             }
         }
 
@@ -132,6 +134,14 @@ final class Compositor: @unchecked Sendable {
             f.color0 = ci(from)
             f.color1 = ci(to)
             return (f.outputImage ?? CIImage(color: ci(from))).cropped(to: rect)
+        case let .radialGradient(from, to):
+            // Center slightly above middle (the artboards' lit-backdrop look), edges in `to`.
+            let f = CIFilter.gaussianGradient()
+            f.center = CGPoint(x: size.width / 2, y: size.height * 0.58)
+            f.radius = Float(max(size.width, size.height) * 0.75)
+            f.color0 = ci(from)
+            f.color1 = ci(to)
+            return (f.outputImage ?? CIImage(color: ci(to))).cropped(to: rect)
         case let .image(path):
             if let img = CIImage(contentsOf: URL(fileURLWithPath: path)) {
                 return Self.aspectFill(img, to: rect)
@@ -176,12 +186,14 @@ final class Compositor: @unchecked Sendable {
         return image.applyingFilter("CIBlendWithAlphaMask", parameters: [kCIInputMaskImageKey: placedMask])
     }
 
-    private func cursorLayer(atTopLeft p: CGPoint, outputSize: CGSize) -> CIImage {
+    private func cursorLayer(atTopLeft p: CGPoint, outputSize: CGSize, scale: Double = 1) -> CIImage {
         // Align the arrow tip (hotspot) to p. Convert the sprite's top-left origin to CI.
-        let originX = p.x - CursorSprite.hotspot.x
-        let topLeftY = p.y - CursorSprite.hotspot.y
-        let ciY = outputSize.height - topLeftY - CursorSprite.size.height
-        return cursorImage.transformed(by: CGAffineTransform(translationX: originX, y: ciY))
+        let s = max(0.5, scale)
+        let originX = p.x - CursorSprite.hotspot.x * s
+        let topLeftY = p.y - CursorSprite.hotspot.y * s
+        let ciY = outputSize.height - topLeftY - CursorSprite.size.height * s
+        let scaled = s == 1 ? cursorImage : cursorImage.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        return scaled.transformed(by: CGAffineTransform(translationX: originX, y: ciY))
     }
 
     /// An expanding, fading ring centered at a click. Radius grows and alpha fades with progress.

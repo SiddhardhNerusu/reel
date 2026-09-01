@@ -1,505 +1,718 @@
 import AVKit
 import SwiftUI
 
-/// The Studio — a scrubbable live preview (pixel-identical to export, §5.6) beside the few dials
-/// that matter: background, aspect, auto-zoom, trim. Editing never touches `raw.mov`, so you can
-/// retune and re-export forever.
+/// The Darkroom editor (IMPLEMENTATION_BRIEF §2.4, artboard 1d).
+/// toolbar 52 / preview+inspector / timeline 164. The preview is the hero; chrome stays matte.
 struct EditorView: View {
-    @StateObject var model: EditorModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var format: ExportFormat = .mp4
-
-    enum ExportFormat: String, CaseIterable { case mp4 = "MP4", gif = "GIF" }
+    @ObservedObject var model: EditorModel
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            WindowBackground()
-            VStack(spacing: 0) {
-                topBar
-                Divider().overlay(RC.hairline)
-                HStack(spacing: 0) {
-                    stage
-                    Divider().overlay(RC.hairline)
-                    inspector.frame(width: 276)
-                }
+        VStack(spacing: 0) {
+            toolbar
+            Rectangle().fill(RC.hairlineSoft).frame(height: 1)
+            HStack(spacing: 0) {
+                previewArea
+                Rectangle().fill(RC.hairlineSoft).frame(width: 1)
+                InspectorView(model: model)
+                    .frame(width: 296)
+                    .background(RC.base)
             }
-            if let out = model.exportedURL, !model.isExporting {
-                ExportToast(name: out.lastPathComponent,
-                            onCopy: { model.copyExportToClipboard() },
-                            onReveal: { model.revealExport() },
-                            onDismiss: { model.dismissToast() })
-                    .padding(.bottom, 92)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task(id: out) {
-                        try? await Task.sleep(nanoseconds: 6_000_000_000)
-                        model.dismissToast()
-                    }
-            }
+            Rectangle().fill(RC.hairlineSoft).frame(height: 1)
+            EditorTimeline(model: model)
+                .frame(height: 164)
+                .background(RC.base)
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.exportedURL)
-        .frame(minWidth: 860, minHeight: 560)
-        .preferredColorScheme(.dark)
-        .background(keyShortcuts)
-        .task { await model.rebuildPreview(); await model.loadFilmstrip() }
+        .background(RC.base)
+        .frame(minWidth: 1280, minHeight: 800)
+        .task {
+            await model.rebuildPreview()
+            await model.loadFilmstrip()
+            await model.loadSilencePreview()
+        }
         .onDisappear { model.teardown() }
-        .onChange(of: model.presetIndex) { Task { await model.rebuildPreview() } }
-        .onChange(of: model.aspect) { Task { await model.rebuildPreview() } }
-        .onChange(of: model.autoZoom) { Task { await model.rebuildPreview() } }
-        .onChange(of: model.trimIn) { Task { await model.rebuildPreview() } }
-        .onChange(of: model.trimOut) { Task { await model.rebuildPreview() } }
+        .sheet(isPresented: $model.showExportSheet) { ExportSheet(model: model) }
+        .onKeyPress(.space) { model.togglePlay(); return .handled }
+        .onKeyPress(.deleteForward) { deleteSelected(); return .handled }
+        .onKeyPress(.leftArrow) { model.step(-1); return .handled }
+        .onKeyPress(.rightArrow) { model.step(1); return .handled }
     }
 
-    /// Invisible buttons that register app-standard editor shortcuts (Space, ←/→ frame-step).
-    /// ⌘E (export) and Esc (close) live on their real buttons.
-    private var keyShortcuts: some View {
-        ZStack {
-            Button("") { model.togglePlay() }.keyboardShortcut(.space, modifiers: [])
-            Button("") { model.step(-1) }.keyboardShortcut(.leftArrow, modifiers: [])
-            Button("") { model.step(1) }.keyboardShortcut(.rightArrow, modifiers: [])
-            // ⌘1…⌘5 pick a background.
-            ForEach(Array(ThemePresets.all.enumerated()), id: \.offset) { i, _ in
-                Button("") { model.presetIndex = i }
-                    .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
-            }
-        }
-        .opacity(0).allowsHitTesting(false)
+    private func deleteSelected() {
+        if let id = model.selectedSegmentID { model.deleteSegment(id) }
     }
 
-    // MARK: Top bar
+    // MARK: Toolbar (§2.4)
 
-    private var topBar: some View {
-        HStack(spacing: 12) {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.left").font(.system(size: 15, weight: .semibold))
-            }
-            .buttonStyle(.plain).foregroundStyle(RC.textDim)
-            .keyboardShortcut(.cancelAction)
+    @State private var renaming = false
+    @State private var renameText = ""
 
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Untitled demo").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(RC.text)
-                Text("\(fmt(model.totalDuration)) · \(RecordingCoordinator.outputSize(for: model.doc.project).label)")
-                    .font(.system(size: 11)).monospacedDigit().foregroundStyle(RC.textFaint)
+    private var toolbar: some View {
+        HStack(spacing: 14) {
+            Spacer().frame(width: 64)   // traffic lights
+            if renaming {
+                TextField("", text: $renameText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(RC.ink)
+                    .frame(width: 200)
+                    .onSubmit { model.rename(to: renameText); renaming = false }
+                    .onExitCommand { renaming = false }
+            } else {
+                Button {
+                    renameText = model.displayTitle; renaming = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(model.displayTitle).font(.system(size: 13, weight: .semibold)).foregroundStyle(RC.ink)
+                        Text(".reel").font(RC.mono(10.5)).foregroundStyle(RC.ink4)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
             Spacer()
 
-            MiniSegmented(items: ExportFormat.allCases.map { ($0, $0.rawValue) }, selection: $format)
-
+            HStack(spacing: 6) {
+                ForEach(AspectPreset.allCases, id: \.self) { a in
+                    Chip(text: a.label, selected: model.state.aspect == a) {
+                        model.pushUndo(); model.state.aspect = a
+                    }
+                }
+            }
+            Rectangle().fill(RC.hairlineSoft).frame(width: 1, height: 20)
+            HStack(spacing: 2) {
+                iconButton("arrow.uturn.backward", enabled: model.canUndo) { model.undo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                iconButton("arrow.uturn.forward", enabled: model.canRedo) { model.redo() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
             Button {
-                Task { await model.export(gif: format == .gif) }
+                model.showExportSheet = true
             } label: {
-                Label("Export", systemImage: "square.and.arrow.up")
+                HStack(spacing: 7) {
+                    Text("Export")
+                    Text("⌘E").font(RC.mono(10.5)).opacity(0.6)
+                }
             }
-            .buttonStyle(.reelAccent)
+            .buttonStyle(.reelPrimary)
             .keyboardShortcut("e", modifiers: .command)
-            .disabled(model.isExporting)
         }
-        .padding(.leading, 78).padding(.trailing, 16).frame(height: 52)
+        .padding(.horizontal, 16)
+        .frame(height: 52)
+        .background(RC.base)
     }
 
-    // MARK: Stage
+    private func iconButton(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(enabled ? RC.ink2 : RC.ink.opacity(0.25))
+                .frame(width: 30, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
 
-    private var stage: some View {
-        VStack(spacing: 0) {
+    // MARK: Preview (§2.4 — the stage)
+
+    private var previewArea: some View {
+        GeometryReader { geo in
+            let avail = CGSize(width: max(geo.size.width - 72, 40), height: max(geo.size.height - 72, 30))
+            let aspect = model.outputAspect
+            let w = min(avail.width, avail.height * aspect)
+            let h = w / aspect
             ZStack {
-                canvasBackdrop
-                PlayerCanvas(player: model.player)
-                    .aspectRatio(model.outputAspect, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.08), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.55), radius: 34, y: 16)
-                    .padding(32)
+                RC.stage
+                ZStack {
+                    PlayerLayerView(player: model.player)
+                    ZoomTargetOverlay(model: model)
+                }
+                .frame(width: w, height: h)
+                .clipShape(RoundedRectangle(cornerRadius: RC.rCard))
+                .overlay(RoundedRectangle(cornerRadius: RC.rCard).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 70, y: 30)
+                .shadow(color: .black.opacity(0.30), radius: 14, y: 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            bottomBar
-                .padding(.horizontal, 20).padding(.vertical, 14)
-                .background(RC.surface)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    /// A calm editor canvas — a deep neutral with a faint center lift, so the framed preview reads
-    /// as "sitting on a surface" rather than floating in black.
-    private var canvasBackdrop: some View {
-        ZStack {
-            RC.canvasInset
-            RadialGradient(colors: [.white.opacity(0.05), .clear],
-                           center: .center, startRadius: 8, endRadius: 420)
         }
     }
+}
 
-    private var bottomBar: some View {
-        HStack(spacing: 14) {
-            Button { model.togglePlay() } label: {
-                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 13)).foregroundStyle(RC.text)
-                    .frame(width: 36, height: 36)
-                    .background(RC.raised, in: Circle())
-                    .overlay(Circle().stroke(RC.hairline, lineWidth: 1))
+// MARK: - AVPlayerLayer host
+
+struct PlayerLayerView: NSViewRepresentable {
+    let player: AVPlayer
+    func makeNSView(context: Context) -> PlayerNSView {
+        let v = PlayerNSView()
+        v.playerLayer.player = player
+        v.playerLayer.videoGravity = .resizeAspect
+        return v
+    }
+    func updateNSView(_ v: PlayerNSView, context: Context) { v.playerLayer.player = player }
+
+    final class PlayerNSView: NSView {
+        let playerLayer = AVPlayerLayer()
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            layer = playerLayer
+        }
+        required init?(coder: NSCoder) { fatalError("unsupported") }
+    }
+}
+
+// MARK: - Zoom target box (§2.4 — dashed amber, drag to re-aim, corner handles to re-scale)
+
+/// Drawn over the preview while a zoom block is selected. Maps the segment's camera viewport
+/// (source px) into preview coordinates assuming a REST camera — selecting a block scrubs to just
+/// before its activation, where the camera is (near) rest, so the box lines up with the footage.
+struct ZoomTargetOverlay: View {
+    @ObservedObject var model: EditorModel
+    @State private var dragStartCenter: CGPoint?
+    @State private var dragStartScale: Double?
+
+    var body: some View {
+        GeometryReader { geo in
+            if let seg = model.selectedSegment {
+                let src = model.doc.project.geometry.sourceSize
+                // Replicate the compositor's padding: content inset = paddingFraction × min side.
+                let inset = min(geo.size.width, geo.size.height) * model.state.paddingFraction
+                let card = CGRect(x: inset, y: inset,
+                                  width: max(geo.size.width - inset * 2, 1),
+                                  height: max(geo.size.height - inset * 2, 1))
+                let sx = card.width / src.width
+                let sy = card.height / src.height
+                let rect = CGRect(x: card.minX + seg.center.x * sx - src.width / seg.scale * sx / 2,
+                                  y: card.minY + seg.center.y * sy - src.height / seg.scale * sy / 2,
+                                  width: src.width / seg.scale * sx,
+                                  height: src.height / seg.scale * sy)
+
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(RC.amber.opacity(0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(RC.amber, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                        )
+                        .frame(width: rect.width, height: rect.height)
+                        .offset(x: rect.minX, y: rect.minY)
+                        .gesture(
+                            DragGesture()
+                                .onChanged { g in
+                                    if dragStartCenter == nil { model.pushUndo(); dragStartCenter = seg.center }
+                                    guard let start = dragStartCenter else { return }
+                                    let nx = start.x + g.translation.width / sx
+                                    let ny = start.y + g.translation.height / sy
+                                    model.updateSegment(seg.id, center: CGPoint(
+                                        x: min(max(nx, 0), src.width), y: min(max(ny, 0), src.height)))
+                                }
+                                .onEnded { _ in dragStartCenter = nil }
+                        )
+
+                    Text("ZOOM \(blockNumber(seg)) · \(String(format: "%.1f", seg.scale))×")
+                        .font(RC.mono(10, weight: .semibold))
+                        .foregroundStyle(RC.amberInk)
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(RC.amber, in: RoundedRectangle(cornerRadius: 5))
+                        .offset(x: rect.minX, y: max(2, rect.minY - 22))
+
+                    ForEach(0..<4, id: \.self) { corner in
+                        handle(corner: corner, rect: rect, seg: seg)
+                    }
+                }
             }
-            .buttonStyle(.plain).hoverBrighten()
-
-            TrimTimeline(filmstrip: model.filmstrip,
-                         total: max(0.1, model.totalDuration),
-                         playhead: model.currentTime,
-                         trimIn: $model.trimIn,
-                         trimOut: $model.trimOut,
-                         onSeek: { model.scrub(to: $0) })
-
-            Text("\(fmt(model.currentTime)) / \(fmt(model.totalDuration))")
-                .font(.system(size: 12)).monospacedDigit().foregroundStyle(RC.textFaint)
-                .frame(width: 92, alignment: .trailing)
         }
     }
 
-    // MARK: Inspector
+    private func handle(corner: Int, rect: CGRect, seg: ZoomSegment) -> some View {
+        let hx = corner % 2 == 0 ? rect.minX : rect.maxX
+        let hy = corner < 2 ? rect.minY : rect.maxY
+        return Rectangle()
+            .fill(RC.amber)
+            .frame(width: 8, height: 8)
+            .overlay(Rectangle().stroke(RC.base, lineWidth: 1.5))
+            .position(x: hx, y: hy)
+            .gesture(
+                DragGesture()
+                    .onChanged { g in
+                        if dragStartScale == nil { model.pushUndo(); dragStartScale = seg.scale }
+                        guard let s0 = dragStartScale else { return }
+                        // Dragging outward grows the viewport ⇒ smaller zoom scale.
+                        let dx = (corner % 2 == 0 ? -g.translation.width : g.translation.width)
+                        let factor = 1 + dx / max(rect.width, 40)
+                        model.updateSegment(seg.id, scale: min(3.0, max(1.05, s0 / factor)))
+                    }
+                    .onEnded { _ in dragStartScale = nil }
+            )
+    }
 
-    private var inspector: some View {
+    private func blockNumber(_ seg: ZoomSegment) -> Int {
+        (model.zoomSegments.firstIndex(where: { $0.id == seg.id }) ?? 0) + 1
+    }
+}
+
+// MARK: - Inspector (§2.4)
+
+struct InspectorView: View {
+    @ObservedObject var model: EditorModel
+    @AppStorage("inspector.motion") private var motionOpen = true
+    @AppStorage("inspector.cursor") private var cursorOpen = false
+    @AppStorage("inspector.frame") private var frameOpen = false
+    @AppStorage("inspector.background") private var backgroundOpen = false
+    @AppStorage("inspector.audio") private var audioOpen = false
+
+    var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                group("Background") {
-                    HStack(spacing: 10) {
-                        ForEach(Array(ThemePresets.all.enumerated()), id: \.offset) { i, preset in
-                            Swatch(style: preset.background, selected: model.presetIndex == i) {
-                                model.presetIndex = i
+            VStack(spacing: 2) {
+                section("Motion", summary: "auto", isOpen: $motionOpen) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Calm").font(.system(size: 10.5)).foregroundStyle(RC.ink3)
+                            Spacer()
+                            Text("Dynamic").font(.system(size: 10.5)).foregroundStyle(RC.ink3)
+                        }
+                        ReelSlider(value: Binding(
+                            get: { model.state.motionDial },
+                            set: { model.state.motionDial = $0 }),
+                            onEditingChanged: { if $0 { model.pushUndo() } })
+                        Text("One dial: zoom speed, ease and hold, tuned together.")
+                            .font(.system(size: 10.5)).foregroundStyle(RC.ink4)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                section("Cursor", summary: String(format: "%.1f×", model.state.cursorScale), isOpen: $cursorOpen) {
+                    VStack(spacing: 12) {
+                        sliderRow("Size", value: Binding(
+                            get: { model.state.cursorScale - 1.0 },
+                            set: { model.state.cursorScale = 1.0 + $0 }),
+                            readout: String(format: "%.1f×", model.state.cursorScale))
+                        sliderRow("Smoothing", value: Binding(
+                            get: { model.state.cursorSmoothing },
+                            set: { model.state.cursorSmoothing = $0 }),
+                            readout: smoothingLabel)
+                        HStack {
+                            Text("Click ripples").font(RC.body).foregroundStyle(RC.ink)
+                            Spacer()
+                            ReelToggle(isOn: Binding(
+                                get: { model.state.clickRipples },
+                                set: { newValue in model.pushUndo(); model.state.clickRipples = newValue }))
+                        }
+                    }
+                }
+                section("Frame", summary: "\(Int((model.state.paddingFraction * 100).rounded()))%", isOpen: $frameOpen) {
+                    VStack(spacing: 12) {
+                        sliderRow("Padding", value: Binding(
+                            get: { model.state.paddingFraction / 0.15 },
+                            set: { model.state.paddingFraction = $0 * 0.15 }),
+                            readout: "\(Int((model.state.paddingFraction * 100).rounded()))%")
+                        sliderRow("Corners", value: Binding(
+                            get: { model.state.cornerRadius / 24 },
+                            set: { model.state.cornerRadius = ($0 * 24).rounded() }),
+                            readout: "\(Int(model.state.cornerRadius))")
+                        HStack {
+                            Text("Shadow").font(RC.body).foregroundStyle(RC.ink)
+                            Spacer()
+                            HStack(spacing: 6) {
+                                ForEach(Array(["S", "M", "L"].enumerated()), id: \.offset) { i, l in
+                                    Chip(text: l, selected: model.state.shadowLevel == i, height: 24) {
+                                        model.pushUndo(); model.state.shadowLevel = i
+                                    }
+                                }
                             }
                         }
                     }
                 }
-
-                group("Aspect ratio") {
-                    FlowChips(items: AspectPreset.allCases, selection: $model.aspect) { $0.label }
-                }
-
-                group("Motion") {
-                    Toggle(isOn: $model.autoZoom) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Auto-zoom").font(.system(size: 13, weight: .semibold)).foregroundStyle(RC.text)
-                            Text("Follow clicks with an eased camera")
-                                .font(.system(size: 11.5)).foregroundStyle(RC.textFaint)
+                section("Background", summary: backgroundSummary, isOpen: $backgroundOpen) {
+                    VStack(spacing: 10) {
+                        HStack(spacing: 8) {
+                            ForEach(Array(ThemePresets.all.enumerated()), id: \.offset) { _, preset in
+                                BackgroundSwatch(style: preset.background,
+                                                 selected: model.state.background == preset.background) {
+                                    model.pushUndo()
+                                    model.state.background = preset.background
+                                }
+                            }
                         }
+                        Button("Custom — image or color…") { pickCustomBackground() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11.5)).foregroundStyle(RC.ink3)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 28)
+                            .overlay(RoundedRectangle(cornerRadius: 7)
+                                .strokeBorder(RC.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
                     }
-                    .toggleStyle(.switch).tint(RC.accent)
                 }
-
-                if model.isExporting {
-                    ProgressView(value: model.exportProgress) {
-                        Text("Rendering \(format.rawValue)…").font(.system(size: 11)).foregroundStyle(RC.textDim)
+                section("Audio", summary: audioSummary, isOpen: $audioOpen) {
+                    HStack {
+                        Text("Remove silence").font(RC.body).foregroundStyle(RC.ink)
+                        Spacer()
+                        ReelToggle(isOn: Binding(
+                            get: { model.state.removeSilence },
+                            set: { newValue in
+                                model.pushUndo(); model.state.removeSilence = newValue
+                                Task { await model.loadSilencePreview() }
+                            }))
                     }
-                }
-                if let err = model.errorText {
-                    Text(err).font(.system(size: 11.5)).foregroundStyle(RC.record)
                 }
             }
-            .padding(18)
-        }
-        .background(RC.surface)
-    }
-
-    private func group<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 11) {
-            SectionLabel(text: title)
-            content()
+            .padding(.vertical, 8)
         }
     }
 
-    private func fmt(_ v: Double) -> String {
-        let s = max(0, v)
-        return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+    private var smoothingLabel: String {
+        let s = model.state.cursorSmoothing
+        return s < 0.1 ? "off" : (s < 0.4 ? "low" : (s < 0.75 ? "med" : "high"))
     }
-}
 
-// MARK: - Components
-
-/// AVPlayerView with its own controls hidden — we drive playback with a custom transport.
-private struct PlayerCanvas: NSViewRepresentable {
-    let player: AVPlayer
-    func makeNSView(context: Context) -> AVPlayerView {
-        let v = AVPlayerView()
-        v.player = player
-        v.controlsStyle = .none
-        v.videoGravity = .resizeAspect
-        v.wantsLayer = true
-        v.layer?.backgroundColor = .clear   // no black fill behind the framed media
-        return v
+    private var backgroundSummary: String {
+        ThemePresets.all.first { $0.background == model.state.background }?.name.lowercased() ?? "custom"
     }
-    func updateNSView(_ v: AVPlayerView, context: Context) { v.player = player }
-}
 
-/// Transient confirmation after export, with the demo-tool essentials: Copy (to clipboard) + Reveal.
-private struct ExportToast: View {
-    let name: String
-    let onCopy: () -> Void
-    let onReveal: () -> Void
-    let onDismiss: () -> Void
-    @State private var copied = false
+    private var audioSummary: String {
+        guard model.state.removeSilence else { return "off" }
+        return String(format: "silence off −%.1fs", model.silenceSavings)
+    }
 
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(RC.success).font(.system(size: 17))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Exported").font(.system(size: 13, weight: .semibold)).foregroundStyle(RC.text)
-                Text(name).font(.system(size: 11)).foregroundStyle(RC.textFaint).lineLimit(1)
-            }
-            .frame(minWidth: 120, alignment: .leading)
+    private func pickCustomBackground() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            model.pushUndo()
+            model.state.background = .image(path: url.path)
+        }
+    }
 
+    @ViewBuilder
+    private func section(_ name: String, summary: String, isOpen: Binding<Bool>,
+                         @ViewBuilder content: () -> some View) -> some View {
+        VStack(spacing: 0) {
             Button {
-                onCopy(); copied = true
+                withAnimation(.easeOut(duration: 0.15)) { isOpen.wrappedValue.toggle() }
             } label: {
-                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(RC.ink3)
+                        .rotationEffect(.degrees(isOpen.wrappedValue ? 90 : 0))
+                    Text(name).font(RC.label).foregroundStyle(RC.ink)
+                    Spacer()
+                    Text(summary).font(RC.mono(10)).foregroundStyle(RC.ink4)
+                }
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.reelAccent)
-
-            Button { onReveal() } label: { Label("Reveal", systemImage: "folder") }
-                .buttonStyle(.reelSoft)
-
-            Button { onDismiss() } label: {
-                Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+            .buttonStyle(.plain)
+            if isOpen.wrappedValue {
+                content()
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 16)
             }
-            .buttonStyle(.plain).foregroundStyle(RC.textFaint).padding(.leading, 2)
+            Rectangle().fill(RC.hairlineSoft).frame(height: 1).padding(.horizontal, 12)
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .background(RC.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(RC.hairlineStrong, lineWidth: 1))
-        .shadow(color: .black.opacity(0.4), radius: 26, y: 12)
+    }
+
+    private func sliderRow(_ name: String, value: Binding<Double>, readout: String) -> some View {
+        HStack(spacing: 10) {
+            Text(name).font(.system(size: 12)).foregroundStyle(RC.ink2)
+                .frame(width: 68, alignment: .leading)
+            ReelSlider(value: value, onEditingChanged: { began in if began { model.pushUndo() } })
+            Text(readout).font(RC.mono(10.5)).foregroundStyle(RC.ink3)
+                .frame(width: 34, alignment: .trailing)
+        }
     }
 }
 
-/// A small custom segmented control that matches the app (native `.segmented` renders generic blue).
-private struct MiniSegmented<T: Hashable>: View {
-    let items: [(T, String)]
-    @Binding var selection: T
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(items, id: \.0) { item in
-                Button { selection = item.0 } label: {
-                    Text(item.1)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(selection == item.0 ? RC.text : RC.textDim)
-                        .padding(.horizontal, 14).padding(.vertical, 5)
-                        .background(selection == item.0 ? RC.raised : .clear, in: RoundedRectangle(cornerRadius: 6))
-                        .shadow(color: selection == item.0 ? .black.opacity(0.15) : .clear, radius: 2, y: 1)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .background(RC.surface2, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(RC.hairline, lineWidth: 1))
-    }
-}
-
-/// The trim timeline (BUILD_PLAN §11 M6): a filmstrip of the recording with draggable in/out
-/// handles, a dimmed region outside the selection, and a live playhead. Clicking/dragging the body
-/// scrubs; dragging a handle trims. One element does what two plain sliders used to.
-private struct TrimTimeline: View {
-    let filmstrip: [CGImage]
-    let total: Double
-    let playhead: Double
-    @Binding var trimIn: Double
-    @Binding var trimOut: Double
-    let onSeek: (Double) -> Void
-
-    private let h: CGFloat = 46
-    private let handleW: CGFloat = 11
-    private let space = "trim"
-
-    @State private var activeLabel: LabelInfo?
-    private struct LabelInfo { var x: CGFloat; var text: String }
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let inX = x(trimIn, w), outX = x(trimOut, w), phX = x(min(max(playhead, 0), total), w)
-            ZStack(alignment: .leading) {
-                filmstripView(w: w)
-                    .frame(width: w, height: h)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .allowsHitTesting(false)
-
-                // Scrub anywhere on the body (sits under the handles).
-                Color.clear.contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(space))
-                        .onChanged { g in
-                            let t = clamp(Double(g.location.x / w) * total)
-                            onSeek(t); activeLabel = LabelInfo(x: g.location.x, text: timeStr(t))
-                        }
-                        .onEnded { _ in activeLabel = nil })
-
-                // Dim outside the selection.
-                Rectangle().fill(.black.opacity(0.5)).frame(width: max(0, inX), height: h)
-                    .allowsHitTesting(false)
-                Rectangle().fill(.black.opacity(0.5)).frame(width: max(0, w - outX), height: h)
-                    .offset(x: outX).allowsHitTesting(false)
-
-                RoundedRectangle(cornerRadius: 7).stroke(RC.accent, lineWidth: 2)
-                    .frame(width: max(0, outX - inX), height: h).offset(x: inX)
-                    .allowsHitTesting(false)
-
-                ZStack {
-                    Capsule().fill(.white).frame(width: 2.5, height: h)
-                    Circle().fill(.white).frame(width: 10, height: 10).offset(y: -h / 2 + 2)
-                }
-                .frame(width: 10, height: h)
-                .shadow(color: .black.opacity(0.5), radius: 2)
-                .offset(x: phX - 5).allowsHitTesting(false)
-
-                handle(at: inX, w: w) { nx in trimIn = min(max(0, nx), trimOut - 0.3) }
-                handle(at: outX, w: w) { nx in trimOut = max(min(total, nx), trimIn + 0.3) }
-
-                if let lbl = activeLabel {
-                    Text(lbl.text)
-                        .font(.system(size: 11, weight: .semibold)).monospacedDigit()
-                        .foregroundStyle(RC.text)
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(RC.raised, in: Capsule())
-                        .overlay(Capsule().stroke(RC.hairlineStrong, lineWidth: 1))
-                        .fixedSize()
-                        .position(x: min(max(22, lbl.x), w - 22), y: -13)
-                        .allowsHitTesting(false)
-                }
-            }
-            .frame(width: w, height: h)
-            .coordinateSpace(name: space)
-        }
-        .frame(height: h)
-    }
-
-    private func filmstripView(w: CGFloat) -> some View {
-        let n = max(1, filmstrip.count)
-        let cell = (w - CGFloat(n - 1)) / CGFloat(n)   // 1px separators between frames
-        return HStack(spacing: 1) {
-            if filmstrip.isEmpty {
-                RC.surface2
-            } else {
-                ForEach(filmstrip.indices, id: \.self) { i in
-                    Image(decorative: filmstrip[i], scale: 1)
-                        .resizable().aspectRatio(contentMode: .fill)
-                        .frame(width: cell, height: h)
-                        .clipped()
-                }
-            }
-        }
-        .frame(width: w, height: h)
-        .background(Color.black)                                       // shows through as separators
-        .overlay(LinearGradient(colors: [.black.opacity(0.10), .black.opacity(0.34)],
-                                startPoint: .top, endPoint: .bottom))  // tame bright content
-        .saturation(0.9)
-    }
-
-    private func handle(at hx: CGFloat, w: CGFloat, onDrag: @escaping (Double) -> Void) -> some View {
-        RoundedRectangle(cornerRadius: 4)
-            .fill(RC.accent)
-            .frame(width: handleW, height: h)
-            .overlay(Capsule().fill(.white.opacity(0.9)).frame(width: 2, height: 14))
-            .frame(width: handleW + 16, height: h)          // widen the hit target, handle centered
-            .contentShape(Rectangle())
-            .offset(x: hx - (handleW + 16) / 2)
-            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(space))
-                .onChanged { g in
-                    let t = clamp(Double(g.location.x / max(1, w)) * total)
-                    onDrag(t); activeLabel = LabelInfo(x: g.location.x, text: timeStr(t))
-                }
-                .onEnded { _ in activeLabel = nil })
-    }
-
-    private func x(_ t: Double, _ w: CGFloat) -> CGFloat { CGFloat(t / max(0.0001, total)) * w }
-    private func clamp(_ t: Double) -> Double { min(max(0, t), total) }
-    private func timeStr(_ t: Double) -> String {
-        String(format: "%d:%02d", Int(max(0, t)) / 60, Int(max(0, t)) % 60)
-    }
-}
-
-private struct Swatch: View {
+/// Small square background preview (gradient or solid).
+struct BackgroundSwatch: View {
     let style: BackgroundStyle
     let selected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            RoundedRectangle(cornerRadius: 9)
-                .fill(BackgroundStylePreview.shape(style))
-                .frame(width: 34, height: 34)
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(RC.hairline, lineWidth: 1))
-                .overlay(
-                    selected ? RoundedRectangle(cornerRadius: 9).stroke(RC.accent, lineWidth: 2).padding(-3) : nil
-                )
-                .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
+            RoundedRectangle(cornerRadius: 7)
+                .fill(fillStyle)
+                .frame(width: 32, height: 32)
+                .padding(2)
+                .overlay(RoundedRectangle(cornerRadius: 9)
+                    .stroke(selected ? RC.amber : .clear, lineWidth: 1.5))
         }
         .buttonStyle(.plain)
-        .hoverLift(scale: 1.08)
     }
-}
 
-/// Renders a `BackgroundStyle` as a SwiftUI gradient/color for swatches + (future) canvas chrome.
-enum BackgroundStylePreview {
-    static func shape(_ style: BackgroundStyle) -> AnyShapeStyle {
+    private var fillStyle: AnyShapeStyle {
         switch style {
         case let .solid(c):
-            return AnyShapeStyle(color(c))
-        case let .linearGradient(from, to, _):
-            return AnyShapeStyle(LinearGradient(colors: [color(from), color(to)],
-                                                startPoint: .topLeading, endPoint: .bottomTrailing))
+            return AnyShapeStyle(Color(.sRGB, red: c.r, green: c.g, blue: c.b))
+        case let .linearGradient(f, t, _):
+            return AnyShapeStyle(LinearGradient(
+                colors: [Color(.sRGB, red: f.r, green: f.g, blue: f.b),
+                         Color(.sRGB, red: t.r, green: t.g, blue: t.b)],
+                startPoint: .topLeading, endPoint: .bottomTrailing))
+        case let .radialGradient(f, t):
+            return AnyShapeStyle(RadialGradient(
+                colors: [Color(.sRGB, red: f.r, green: f.g, blue: f.b),
+                         Color(.sRGB, red: t.r, green: t.g, blue: t.b)],
+                center: .init(x: 0.5, y: 0.42), startRadius: 2, endRadius: 28))
         case .image:
             return AnyShapeStyle(Color.gray)
         }
     }
-    static func color(_ c: RGBAColor) -> Color { Color(.sRGB, red: c.r, green: c.g, blue: c.b, opacity: c.a) }
 }
 
-private struct FlowChips<T: Hashable>: View {
-    let items: [T]
-    @Binding var selection: T
-    let label: (T) -> String
+// MARK: - Timeline (§2.4)
+
+struct EditorTimeline: View {
+    @ObservedObject var model: EditorModel
+    @State private var trimDragStart: Double?
 
     var body: some View {
-        FlowLayout(spacing: 7, lineSpacing: 7) {
-            ForEach(items, id: \.self) { item in
-                let on = item == selection
-                Button { selection = item } label: {
-                    Text(label(item))
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .lineLimit(1).fixedSize()
-                        .foregroundStyle(on ? .white : RC.textDim)
-                        .padding(.horizontal, 11).padding(.vertical, 6)
-                        .background(on ? RC.accent : RC.surface2, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(on ? .clear : RC.hairline, lineWidth: 1))
+        HStack(spacing: 0) {
+            transport.frame(width: 170)
+            GeometryReader { geo in
+                let w = max(geo.size.width - 24, 10)
+                let dur = max(0.1, model.totalDuration)
+                let px = w / dur
+                VStack(alignment: .leading, spacing: 6) {
+                    ruler(px: px, dur: dur)
+                    zoomTrack(px: px)
+                    clipStrip(px: px, dur: dur)
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .overlay(alignment: .topLeading) { playhead(px: px) }
             }
         }
+    }
+
+    private var transport: some View {
+        VStack(spacing: 10) {
+            Button {
+                model.togglePlay()
+            } label: {
+                ZStack {
+                    Circle().fill(RC.ink).frame(width: 40, height: 40)
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(RC.base)
+                        .offset(x: model.isPlaying ? 0 : 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .hoverRaise()
+            HStack(spacing: 0) {
+                Text(timecode(model.currentTime)).font(RC.mono(11.5)).foregroundStyle(RC.ink2)
+                Text(" / " + timecode(model.totalDuration)).font(RC.mono(11.5)).foregroundStyle(RC.ink.opacity(0.28))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func timecode(_ t: Double) -> String {
+        String(format: "%02d:%04.1f", Int(t) / 60, t.truncatingRemainder(dividingBy: 60))
+    }
+
+    private func ruler(px: CGFloat, dur: Double) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear.frame(height: 14)
+            ForEach(0...max(1, Int(dur / 5)), id: \.self) { i in
+                let t = Double(i) * 5
+                if t <= dur {
+                    Text(String(format: "%d:%02d", Int(t) / 60, Int(t) % 60))
+                        .font(RC.mono(9.5))
+                        .foregroundStyle(RC.ink.opacity(0.28))
+                        .offset(x: CGFloat(t) * px)
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+            model.scrub(to: Double(g.location.x / px))
+        })
+    }
+
+    private func zoomTrack(px: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear.frame(height: 30)
+            ForEach(model.zoomSegments) { seg in
+                ZoomBlockView(model: model, seg: seg, px: px)
+            }
+        }
+        .contextMenu {
+            Button("Add zoom at playhead") { model.addSegmentAtPlayhead() }
+        }
+    }
+
+    private func clipStrip(px: CGFloat, dur: Double) -> some View {
+        ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                ForEach(Array(model.filmstrip.enumerated()), id: \.offset) { _, cg in
+                    Image(decorative: cg, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: max(10, px * dur / CGFloat(max(1, model.filmstrip.count))), height: 52)
+                        .clipped()
+                }
+            }
+            .frame(width: px * dur, height: 52, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: RC.rButton))
+
+            let inX = CGFloat(model.state.trimIn) * px
+            let outX = CGFloat(model.state.trimOut) * px
+            Rectangle().fill(RC.base.opacity(0.72)).frame(width: max(0, inX), height: 52)
+            Rectangle().fill(RC.base.opacity(0.72))
+                .frame(width: max(0, px * dur - outX), height: 52)
+                .offset(x: outX)
+
+            ForEach(Array(model.silenceCutsPreview.enumerated()), id: \.offset) { _, cut in
+                let x = CGFloat(cut.lowerBound + model.state.trimIn) * px
+                let cw = CGFloat(cut.upperBound - cut.lowerBound) * px
+                CutColumn().frame(width: max(6, cw), height: 52).offset(x: x)
+            }
+
+            trimHandle(at: inX, leading: true, px: px)
+            trimHandle(at: outX, leading: false, px: px)
+        }
+        .frame(height: 52)
+    }
+
+    private func trimHandle(at x: CGFloat, leading: Bool, px: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(RC.ink)
+            .frame(width: 10, height: 52)
+            .overlay(RoundedRectangle(cornerRadius: 1).fill(RC.base.opacity(0.6)).frame(width: 2, height: 16))
+            .offset(x: x - (leading ? 10 : 0))
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    if trimDragStart == nil {
+                        model.pushUndo()
+                        trimDragStart = leading ? model.state.trimIn : model.state.trimOut
+                    }
+                    let t = Double(g.location.x / px)
+                    if leading {
+                        model.state.trimIn = min(max(0, t), model.state.trimOut - 0.5)
+                    } else {
+                        model.state.trimOut = max(min(model.totalDuration, t), model.state.trimIn + 0.5)
+                    }
+                }
+                .onEnded { _ in trimDragStart = nil })
+    }
+
+    private func playhead(px: CGFloat) -> some View {
+        let x = 12 + CGFloat(model.currentTime) * px
+        return VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 3).fill(RC.ink).frame(width: 10, height: 8)
+            Rectangle().fill(RC.ink).frame(width: 2)
+                .shadow(color: .white.opacity(0.5), radius: 8)
+        }
+        .frame(height: 128)
+        .offset(x: x - 5, y: 6)
+        .allowsHitTesting(false)
     }
 }
 
-/// A minimal flow layout — lays children left→right and wraps to a new line when they don't fit.
-/// Used so aspect chips keep their labels on one line and wrap the ROW instead.
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 7
-    var lineSpacing: CGFloat = 7
+/// One zoom block: drag = retime, right-edge drag = resize, click = select (§2.4).
+struct ZoomBlockView: View {
+    @ObservedObject var model: EditorModel
+    let seg: ZoomSegment
+    let px: CGFloat
+    @State private var dragStart: Double?
+    @State private var resizeStart: Double?
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var x: CGFloat = 0, rowH: CGFloat = 0, totalH: CGFloat = 0, widest: CGFloat = 0
-        for s in subviews {
-            let sz = s.sizeThatFits(.unspecified)
-            if x + sz.width > maxWidth, x > 0 {
-                totalH += rowH + lineSpacing; widest = max(widest, x - spacing); x = 0; rowH = 0
+    var body: some View {
+        let selected = model.selectedSegmentID == seg.id
+        let x = CGFloat(seg.start + model.state.trimIn) * px
+        let w = max(26, CGFloat(seg.duration) * px)
+
+        ZStack {
+            RoundedRectangle(cornerRadius: 7)
+                .fill(selected ? RC.amber : RC.amberWash)
+                .overlay(RoundedRectangle(cornerRadius: 7)
+                    .stroke(selected ? RC.amber : RC.amberBorder, lineWidth: 1))
+                .shadow(color: selected ? RC.amber.opacity(0.5) : .clear, radius: 8)
+            Text(String(format: "%.1f×", seg.scale))
+                .font(RC.mono(10, weight: selected ? .bold : .medium))
+                .foregroundStyle(selected ? RC.amberInk : RC.amber)
+            if selected {
+                HStack {
+                    grabBar
+                    Spacer()
+                    grabBar
+                }
+                .padding(.horizontal, 3)
             }
-            x += sz.width + spacing; rowH = max(rowH, sz.height)
         }
-        totalH += rowH; widest = max(widest, x - spacing)
-        return CGSize(width: min(maxWidth, widest), height: totalH)
+        .frame(width: w, height: 26)
+        .offset(x: x, y: 2)
+        .onTapGesture {
+            model.selectedSegmentID = seg.id
+            // Scrub to just before activation so the target box maps over a (near) rest camera.
+            model.scrub(to: max(0, seg.start + model.state.trimIn - 0.6))
+        }
+        .gesture(
+            DragGesture()
+                .onChanged { g in
+                    if dragStart == nil { model.pushUndo(); dragStart = seg.start }
+                    guard let s0 = dragStart else { return }
+                    model.updateSegment(seg.id, start: max(0, s0 + Double(g.translation.width / px)))
+                }
+                .onEnded { _ in dragStart = nil }
+        )
+        .contextMenu {
+            Button("Remove zoom") { model.deleteSegment(seg.id) }
+            if seg.clusterIndex != nil {
+                Button("Reset aim") { model.resetSegment(seg.id) }
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            Color.clear.frame(width: 8, height: 26)
+                .contentShape(Rectangle())
+                .gesture(DragGesture()
+                    .onChanged { g in
+                        if resizeStart == nil { model.pushUndo(); resizeStart = seg.duration }
+                        guard let d0 = resizeStart else { return }
+                        model.updateSegment(seg.id, duration: max(0.3, d0 + Double(g.translation.width / px)))
+                    }
+                    .onEnded { _ in resizeStart = nil })
+                .offset(x: x + w - 8, y: 2)
+        }
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX, y = bounds.minY, rowH: CGFloat = 0
-        for s in subviews {
-            let sz = s.sizeThatFits(.unspecified)
-            if x + sz.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX; y += rowH + lineSpacing; rowH = 0
-            }
-            s.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(sz))
-            x += sz.width + spacing; rowH = max(rowH, sz.height)
+    private var grabBar: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(RC.amberInk.opacity(0.5))
+            .frame(width: 3, height: 12)
+    }
+}
+
+/// Hatched "CUT" column for auto-removed silence (§2.4).
+struct CutColumn: View {
+    var body: some View {
+        ZStack {
+            Rectangle().fill(RC.base.opacity(0.65))
+            HatchPattern().stroke(Color.black.opacity(0.4), lineWidth: 2)
+            Text("CUT")
+                .font(RC.mono(8, weight: .semibold))
+                .foregroundStyle(RC.ink3)
+                .rotationEffect(.degrees(-90))
         }
+        .clipped()
+    }
+}
+
+struct HatchPattern: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let step: CGFloat = 7
+        var x = -rect.height
+        while x < rect.width {
+            p.move(to: CGPoint(x: x, y: rect.maxY))
+            p.addLine(to: CGPoint(x: x + rect.height, y: 0))
+            x += step
+        }
+        return p
     }
 }

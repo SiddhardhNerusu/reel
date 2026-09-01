@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import Foundation
@@ -76,22 +77,66 @@ final class RecordingCoordinator: ObservableObject {
 
     // MARK: Record
 
-    func startRecording(display: SCDisplay, excluding ownWindows: [SCWindow] = []) async {
+    /// What to capture (Darkroom launcher: Display / Window / Area — LAUNCH_PLAN P1.1/P1.2).
+    enum CaptureSource {
+        case display(SCDisplay)
+        case window(SCWindow)
+        case area(SCDisplay, CGRect)   // rect in GLOBAL top-left points
+    }
+
+    private lazy var pill = RecordingPillController(coordinator: self)
+    private let countdown = CountdownController()
+
+    /// The user-facing entry: optional 3-2-1 countdown on the target screen, then record.
+    func beginRecordingFlow(source: CaptureSource) {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
+        // Get the launcher out of the shot before the countdown starts.
+        NSApp.windows.forEach { if $0.isVisible, !($0 is NSPanel) { $0.miniaturize(nil) } }
+        countdown.run(seconds: AppSettings.countdownSeconds, on: screen) { [weak self] _ in
+            Task { @MainActor in await self?.startRecording(source: source) }
+        }
+    }
+
+    func startRecording(source: CaptureSource) async {
         guard CapturePermissions.requestScreenRecordingAccess() else {
             phase = .needsPermission
             return
         }
         _ = await CapturePermissions.requestMicrophoneAccess()
 
-        // Keep Reel's own chrome (launcher, recording pill) out of the take. Callers may pass a
-        // specific list; otherwise resolve every window owned by this process.
-        var exclude = ownWindows
-        if exclude.isEmpty,
-           let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) {
+        // Exclusions: Reel's own chrome always; Finder's desktop-icon windows when the user asked
+        // for a clean desktop ("Icons and wallpaper clutter never make the cut", §2.6).
+        var exclude: [SCWindow] = []
+        if let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) {
             let bundleID = Bundle.main.bundleIdentifier
             exclude = content.windows.filter { $0.owningApplication?.bundleIdentifier == bundleID }
+            if AppSettings.hideDesktopWhileRecording {
+                exclude += content.windows.filter {
+                    $0.owningApplication?.bundleIdentifier == "com.apple.finder" && $0.windowLayer < 0
+                }
+            }
         }
-        let filter = ShareableContent.filter(for: display, excluding: exclude)
+
+        let filter: SCContentFilter
+        var config = ScreenRecorder.Config()
+        switch source {
+        case let .display(d):
+            filter = ShareableContent.filter(for: d, excluding: exclude)
+        case let .window(w):
+            filter = ShareableContent.filter(forWindow: w)
+        case let .area(d, globalRect):
+            filter = ShareableContent.filter(for: d, excluding: exclude)
+            // sourceRect is display-LOCAL top-left points; geometry keeps the GLOBAL rect so
+            // event locations map into the cropped pixel space correctly.
+            let displayOrigin = filter.contentRect.origin
+            config.sourceRect = CGRect(x: globalRect.minX - displayOrigin.x,
+                                       y: globalRect.minY - displayOrigin.y,
+                                       width: globalRect.width, height: globalRect.height)
+            config.geometryOverride = GeometrySnapshot.make(
+                contentRect: globalRect, pointPixelScale: Double(filter.pointPixelScale))
+        }
+
         let url = Self.newProjectURL()
         // The .reelproj package must exist before AVAssetWriter opens raw.mov inside it (the writer
         // does not create parent directories).
@@ -104,12 +149,14 @@ final class RecordingCoordinator: ObservableObject {
             recorder.setStopHandler { [weak self] error in
                 Task { @MainActor in self?.handleStreamStopped(error) }
             }
-            try await recorder.start(filter: filter, config: .init(), outputURL: url.appendingPathComponent(ReelDocument.rawMovieName))
+            try await recorder.start(filter: filter, config: config, outputURL: url.appendingPathComponent(ReelDocument.rawMovieName))
             recordingURL = url
-            currentGeometry = GeometrySnapshot.make(contentRect: filter.contentRect,
-                                                    pointPixelScale: Double(filter.pointPixelScale))
+            currentGeometry = config.geometryOverride
+                ?? GeometrySnapshot.make(contentRect: filter.contentRect,
+                                         pointPixelScale: Double(filter.pointPixelScale))
             recordingStartedAt = Date()
             phase = .recording
+            pill.show()
         } catch {
             events.stop()
             try? FileManager.default.removeItem(at: url)
@@ -117,12 +164,34 @@ final class RecordingCoordinator: ObservableObject {
         }
     }
 
+    /// Back-compat entry (existing callers).
+    func startRecording(display: SCDisplay, excluding ownWindows: [SCWindow] = []) async {
+        await startRecording(source: .display(display))
+    }
+
+    /// Global hotkey (§2.3): toggles stop while recording, otherwise records the main display.
+    func hotkeyToggle() {
+        switch phase {
+        case .recording:
+            Task { await stopRecording() }
+        case .idle, .ready, .failed:
+            Task {
+                if let d = try? await ShareableContent.displays().first {
+                    beginRecordingFlow(source: .display(d))
+                }
+            }
+        default: break
+        }
+    }
+
     /// The capture stream stopped on its own (mid-record failure, §5.1). Surface it and stop the
     /// event tap; the partial `raw.mov` was finalized by the recorder so it stays playable.
     private func handleStreamStopped(_ error: Error?) {
         guard case .recording = phase else { return }   // normal stop() path handles itself
+        pill.hide()
         events.stop()
         recordingStartedAt = nil
+        NSApp.windows.forEach { if $0.isMiniaturized { $0.deminiaturize(nil) } }
         if let error {
             phase = .failed("Recording stopped: \(error.localizedDescription)")
         } else {
@@ -150,18 +219,39 @@ final class RecordingCoordinator: ObservableObject {
     func stopRecording() async {
         guard case .recording = phase else { return }
         phase = .processing("Finalizing recording…")
+        pill.hide()
         events.stop()
         recordingStartedAt = nil
         isPaused = false
         pausedAt = nil
+        // Bring the launcher back (it was miniaturized for the take).
+        NSApp.windows.forEach { if $0.isMiniaturized { $0.deminiaturize(nil) } }
+        NSApp.activate(ignoringOtherApps: true)
         do {
             let result = try await recorder.stop()
             let doc = try buildDocument(from: result)
             lastProject = doc
             phase = .idle
+            Task.detached { Self.writeThumbnail(for: doc.url) }
         } catch {
             phase = .failed("Couldn’t finalize: \(error.localizedDescription)")
         }
+    }
+
+    /// A mid-take frame as `thumbnail.png` inside the package — the launcher's Recent rows.
+    nonisolated static func writeThumbnail(for projectURL: URL) {
+        let raw = projectURL.appendingPathComponent(ReelDocument.rawMovieName)
+        let asset = AVURLAsset(url: raw)
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = CGSize(width: 320, height: 220)
+        let dur = CMTimeGetSeconds(asset.duration)
+        guard dur > 0,
+              let cg = try? gen.copyCGImage(at: CMTime(seconds: dur * 0.3, preferredTimescale: 600),
+                                            actualTime: nil) else { return }
+        let rep = NSBitmapImageRep(cgImage: cg)
+        try? rep.representation(using: .png, properties: [:])?
+            .write(to: projectURL.appendingPathComponent("thumbnail.png"))
     }
 
     /// Generate a synthetic demo (a fake app UI being clicked) and export it — NO screen-recording
@@ -232,6 +322,11 @@ final class RecordingCoordinator: ObservableObject {
 
         var project = ReelProject(recordingStartTime: start, duration: result.duration, geometry: geo)
         project.fps = 60
+        // New takes start on the user's default background (Settings > Defaults, §2.6).
+        let bgIndex = AppSettings.defaultBackgroundIndex
+        if bgIndex >= 0, bgIndex < ThemePresets.all.count {
+            project.theme.background = ThemePresets.all[bgIndex].background
+        }
 
         let doc = ReelDocument(url: result.url.deletingLastPathComponent(),
                                project: project, events: inputEvents, cursor: cursor, window: [])

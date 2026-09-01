@@ -33,6 +33,18 @@ struct ReelProject: Codable, Equatable {
     /// Auto-remove long silent+idle spans on export (on-device silence + input-idle detection).
     var autoRemoveSilence: Bool = true
 
+    // Darkroom editor state (all optional so pre-v2 project.json still decodes) --------
+    /// Display name shown in the editor toolbar; nil ⇒ the .reelproj folder name.
+    var title: String? = nil
+    /// One dial: zoom speed, ease and hold, tuned together (0 calm … 1 dynamic).
+    var motionDial: Double? = nil
+    /// Drawn cursor scale (1.0…2.0×).
+    var cursorScale: Double? = nil
+    /// Cursor smoothing amount (0 off … 1 high).
+    var cursorSmoothing: Double? = nil
+    /// Click ripple rings on/off.
+    var clickRipples: Bool? = nil
+
     var effectiveTrimOut: Double { trimOut < 0 ? duration : min(trimOut, duration) }
     var editedDuration: Double { max(0, effectiveTrimOut - trimIn) }
 }

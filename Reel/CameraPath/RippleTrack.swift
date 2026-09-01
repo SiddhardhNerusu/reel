@@ -42,4 +42,6 @@ struct RenderTracks {
     let camera: CameraTrack
     let cursor: CursorTrack
     let ripples: RippleTrack
+    /// Drawn cursor size multiplier (Darkroom §2.4 Cursor · Size).
+    var cursorScale: Double = 1.4
 }

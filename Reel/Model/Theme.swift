@@ -14,12 +14,14 @@ struct RGBAColor: Codable, Equatable {
 enum BackgroundStyle: Codable, Equatable {
     case solid(RGBAColor)
     case linearGradient(from: RGBAColor, to: RGBAColor, angleDegrees: Double)
+    /// Soft center-out wash (Darkroom presets). `from` at the (slightly raised) center, `to` at edges.
+    case radialGradient(from: RGBAColor, to: RGBAColor)
     case image(path: String)
 }
 
 /// Output aspect ratio. `.source` keeps the captured ratio (no letterboxing).
 enum AspectPreset: String, Codable, CaseIterable {
-    case source, r16x9, r4x3, r1x1, r9x16
+    case source, r16x9, r4x3, r1x1, r9x16, r4x5
 
     /// width/height, or nil for `.source`.
     var ratio: Double? {
@@ -29,6 +31,7 @@ enum AspectPreset: String, Codable, CaseIterable {
         case .r4x3:   return 4.0 / 3.0
         case .r1x1:   return 1.0
         case .r9x16:  return 9.0 / 16.0
+        case .r4x5:   return 4.0 / 5.0
         }
     }
 
@@ -39,6 +42,7 @@ enum AspectPreset: String, Codable, CaseIterable {
         case .r4x3:   return "4:3"
         case .r1x1:   return "1:1"
         case .r9x16:  return "9:16"
+        case .r4x5:   return "4:5"
         }
     }
 }
@@ -51,14 +55,14 @@ struct ShadowStyle: Codable, Equatable {
 
 struct Theme: Codable, Equatable {
     /// Fraction of the smaller output dimension used as padding around the screen card (0…0.5).
-    var paddingFraction: Double = 0.06
+    /// Darkroom acceptance #3: untouched defaults = Dusk bg, 8% padding, radius 10, shadow M.
+    var paddingFraction: Double = 0.08
     /// Card corner radius in output pixels.
-    var cornerRadius: Double = 18
+    var cornerRadius: Double = 10
     var shadow: ShadowStyle = ShadowStyle()
-    var background: BackgroundStyle = .linearGradient(
-        from: RGBAColor(0.36, 0.40, 0.98),
-        to:   RGBAColor(0.60, 0.34, 0.92),
-        angleDegrees: 135)
+    var background: BackgroundStyle = .radialGradient(
+        from: RGBAColor(0x33 / 255.0, 0x41 / 255.0, 0x5C / 255.0),
+        to:   RGBAColor(0x33 / 255.0, 0x2B / 255.0, 0x34 / 255.0))
     var aspect: AspectPreset = .source
     /// Whether the auto-zoom scales the whole frame (`false`) or only the screen card (`true`).
     var contentOnlyZoom: Bool = true
@@ -72,6 +76,7 @@ struct Theme: Codable, Equatable {
         switch background {
         case let .solid(c): bg = "s\(c.r),\(c.g),\(c.b),\(c.a)"
         case let .linearGradient(f, t, a): bg = "g\(f.r),\(f.g),\(f.b),\(f.a)-\(t.r),\(t.g),\(t.b),\(t.a)@\(a)"
+        case let .radialGradient(f, t): bg = "r\(f.r),\(f.g),\(f.b),\(f.a)-\(t.r),\(t.g),\(t.b),\(t.a)"
         case let .image(p): bg = "i\(p)"
         }
         return "\(bg)|\(shadow.blurRadius),\(shadow.offsetY),\(shadow.opacity)|\(cornerRadius)"
