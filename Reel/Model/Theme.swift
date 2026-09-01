@@ -64,4 +64,16 @@ struct Theme: Codable, Equatable {
     var contentOnlyZoom: Bool = true
 
     static let `default` = Theme()
+
+    /// Stable key for render caches — covers exactly the fields the static base layer (background
+    /// + shadow) depends on. Card geometry/size are keyed separately by the caller.
+    var cacheKey: String {
+        let bg: String
+        switch background {
+        case let .solid(c): bg = "s\(c.r),\(c.g),\(c.b),\(c.a)"
+        case let .linearGradient(f, t, a): bg = "g\(f.r),\(f.g),\(f.b),\(f.a)-\(t.r),\(t.g),\(t.b),\(t.a)@\(a)"
+        case let .image(p): bg = "i\(p)"
+        }
+        return "\(bg)|\(shadow.blurRadius),\(shadow.offsetY),\(shadow.opacity)|\(cornerRadius)"
+    }
 }

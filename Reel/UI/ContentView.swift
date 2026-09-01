@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var selectedDisplayID: CGDirectDisplayID?
     @State private var editorDoc: ReelDocument?
     @State private var sourceKind: SourceKind = .display
+    @State private var recents: [RecentRecording] = []
 
     enum SourceKind: String, CaseIterable { case display = "Display", window = "Window" }
 
@@ -28,13 +29,15 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 580)
-        .task { await coordinator.checkAccess(); await refreshDisplays() }
+        .task { await coordinator.checkAccess(); await refreshDisplays(); refreshRecents() }
         .onChange(of: scenePhase) { _, phase in
             // Returning from System Settings after enabling access — re-check without a relaunch.
             if phase == .active {
                 Task { await coordinator.checkAccess(); await refreshDisplays() }
+                refreshRecents()
             }
         }
+        .onChange(of: coordinator.phase) { _, _ in refreshRecents() }
         .sheet(item: $editorDoc) { doc in
             EditorView(model: EditorModel(doc: doc))
         }
@@ -84,6 +87,107 @@ struct ContentView: View {
             trustLine
         }
         statusStrip
+        if coordinator.phase != .recording, coordinator.hasAccess, !recents.isEmpty {
+            recentsSection
+        }
+    }
+
+    // MARK: Recents
+
+    struct RecentRecording: Identifiable {
+        var id: URL { url }
+        let url: URL
+        let date: Date
+        let duration: Double
+    }
+
+    private var recentsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("RECENT RECORDINGS")
+                .font(.system(size: 11, weight: .semibold)).tracking(1.1)
+                .foregroundStyle(RC.textFaint)
+            VStack(spacing: 4) {
+                ForEach(recents.prefix(4)) { rec in
+                    recentRow(rec)
+                }
+            }
+            if recents.count > 4 {
+                Button("Show all \(recents.count) in Finder…") {
+                    NSWorkspace.shared.activateFileViewerSelecting([recents[0].url])
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12)).foregroundStyle(RC.textDim)
+                .padding(.leading, 2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 10)
+    }
+
+    private func recentRow(_ rec: RecentRecording) -> some View {
+        Button {
+            if let doc = try? ReelDocument.open(rec.url) { editorDoc = doc }
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: "film.fill")
+                    .font(.system(size: 13)).foregroundStyle(RC.accent)
+                    .frame(width: 30, height: 30)
+                    .background(RC.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(recTitle(rec)).font(.system(size: 13, weight: .semibold)).foregroundStyle(RC.text)
+                    Text(recSubtitle(rec)).font(.system(size: 11.5)).monospacedDigit().foregroundStyle(RC.textFaint)
+                }
+                Spacer(minLength: 0)
+                Text("Open")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(RC.textDim)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RC.surface, in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).stroke(RC.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .hoverLift()
+        .contextMenu {
+            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([rec.url]) }
+            Button("Move to Bin", role: .destructive) {
+                try? FileManager.default.trashItem(at: rec.url, resultingItemURL: nil)
+                refreshRecents()
+            }
+        }
+    }
+
+    private func recTitle(_ rec: RecentRecording) -> String {
+        let f = DateFormatter()
+        f.doesRelativeDateFormatting = true
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: rec.date)
+    }
+
+    private func recSubtitle(_ rec: RecentRecording) -> String {
+        let s = Int(rec.duration.rounded())
+        return String(format: "%d:%02d · %@", s / 60, s % 60, rec.url.lastPathComponent)
+    }
+
+    private func refreshRecents() {
+        guard let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first else {
+            recents = []; return
+        }
+        let fm = FileManager.default
+        let items = (try? fm.contentsOfDirectory(at: movies, includingPropertiesForKeys:
+            [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+        recents = items
+            .filter { $0.pathExtension == "reelproj" }
+            // A project.json means the take finalized; skip crashed/aborted shells.
+            .filter { fm.fileExists(atPath: $0.appendingPathComponent("project.json").path) }
+            .compactMap { url -> RecentRecording? in
+                guard let data = try? Data(contentsOf: url.appendingPathComponent("project.json")),
+                      let project = try? JSONDecoder().decode(ReelProject.self, from: data) else { return nil }
+                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                return RecentRecording(url: url, date: date, duration: project.duration)
+            }
+            .sorted { $0.date > $1.date }
     }
 
     private var sourcePicker: some View {

@@ -10,14 +10,22 @@ import Foundation
 /// Core Image is y-UP; all top-left→bottom-left conversion is confined to `CameraGeometry`
 /// (the single coordinate adapter) and the small `toCI` helper below. Nothing introduces a flip.
 ///
-/// `@unchecked Sendable`: every stored member is immutable and thread-safe — `CIContext` and
-/// `CIImage` are documented safe to share across threads — so the same compositor is used from the
-/// preview handler, the offline export task, and the MainActor coordinator without a data race.
+/// `@unchecked Sendable`: `CIContext`/`CIImage` are documented thread-safe, and the one mutable
+/// member (the static-base cache) is guarded by its own lock — so the same compositor is used from
+/// the preview handler, the offline export task, and the MainActor coordinator without a data race.
 final class Compositor: @unchecked Sendable {
 
     let ciContext: CIContext
     let colorSpace: CGColorSpace
     private let cursorImage: CIImage
+
+    // Background + shadow are identical on every frame of a render, but as a lazy CIImage recipe
+    // they were re-EXECUTED per frame — including a full-canvas Gaussian blur, the single most
+    // expensive node in the graph (visible as stuttering preview zooms). Render them to real
+    // pixels once per (theme, size) and reuse.
+    private let baseLock = NSLock()
+    private var baseKey: String = ""
+    private var baseImage: CIImage?
 
     init(device: MTLDevice? = MTLCreateSystemDefaultDevice()) {
         // ONE Metal-backed context, reused (creation is expensive).
@@ -42,13 +50,8 @@ final class Compositor: @unchecked Sendable {
         let content = CameraGeometry.contentRect(outputSize: outputSize, sourceSize: sourceSize,
                                                   paddingFraction: theme.paddingFraction)
 
-        // 1) Background (full-bleed).
-        var image = background(theme.background, size: outputSize)
-
-        // 2) Drop shadow under the card.
-        if theme.shadow.opacity > 0 {
-            image = shadow(theme: theme, content: content, outputSize: outputSize).composited(over: image)
-        }
+        // 1+2) Background + drop shadow — static per (theme, size); served from the pixel cache.
+        var image = staticBase(theme: theme, content: content, outputSize: outputSize)
 
         // 3) Screen card: transform source into the content rect, then round the corners.
         let cardTransform = CameraGeometry.cardTransform(
@@ -88,6 +91,31 @@ final class Compositor: @unchecked Sendable {
     }
 
     // MARK: Layers
+
+    /// Background + shadow composited and RENDERED to pixels, cached per (theme, content, size).
+    /// Falls back to the lazy recipe if the render fails (identical output, just slower).
+    private func staticBase(theme: Theme, content: CGRect, outputSize: CGSize) -> CIImage {
+        let key = "\(theme.cacheKey)|\(content)|\(outputSize)"
+        baseLock.lock()
+        if baseKey == key, let cached = baseImage { baseLock.unlock(); return cached }
+        baseLock.unlock()
+
+        var image = background(theme.background, size: outputSize)
+        if theme.shadow.opacity > 0 {
+            image = shadow(theme: theme, content: content, outputSize: outputSize).composited(over: image)
+        }
+        let rect = CGRect(origin: .zero, size: outputSize)
+        guard let cg = ciContext.createCGImage(image.cropped(to: rect), from: rect,
+                                               format: .RGBA8, colorSpace: colorSpace) else {
+            return image
+        }
+        let rendered = CIImage(cgImage: cg)
+        baseLock.lock()
+        baseKey = key
+        baseImage = rendered
+        baseLock.unlock()
+        return rendered
+    }
 
     private func background(_ style: BackgroundStyle, size: CGSize) -> CIImage {
         let rect = CGRect(origin: .zero, size: size)

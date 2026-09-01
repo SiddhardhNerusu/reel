@@ -138,10 +138,22 @@ final class EditorModel: ObservableObject {
 
     // MARK: Preview
 
+    /// Preview proxy size: fit inside ~1.6MP keeping aspect, even dimensions. Compositing the
+    /// full source (e.g. 3456×2234 = 7.7MP) through the CI graph 60×/s stutters during zooms,
+    /// and the preview view is far smaller anyway. Export still runs at full resolution through
+    /// the same compose function.
+    static func previewSize(for full: CGSize) -> CGSize {
+        let maxW = 1600.0, maxH = 1040.0
+        let scale = min(1, min(maxW / max(full.width, 1), maxH / max(full.height, 1)))
+        let w = (full.width * scale / 2).rounded(.down) * 2
+        let h = (full.height * scale / 2).rounded(.down) * 2
+        return CGSize(width: max(w, 2), height: max(h, 2))
+    }
+
     /// Rebuild the live preview from the current edits.
     func rebuildPreview() async {
         let project = editedProject()
-        let outputSize = RecordingCoordinator.outputSize(for: project)
+        let outputSize = Self.previewSize(for: RecordingCoordinator.outputSize(for: project))
         let tracks = currentTracks(for: project)
         let asset = AVURLAsset(url: doc.rawMovieURL)
         do {
