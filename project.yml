@@ -15,7 +15,9 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     ENABLE_HARDENED_RUNTIME: YES         # §8.1 notarization
     ENABLE_APP_SANDBOX: NO               # §4 direct distribution, non-sandboxed
-    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_STYLE: Manual                # pin ONE identity: TCC grants die if the cert flips
+    DEVELOPMENT_TEAM: KX4SBPJ7C4
+    CODE_SIGN_IDENTITY: "Apple Development: Siddhardh Nerusu (TZKP798T68)"
     DEAD_CODE_STRIPPING: YES
     SWIFT_STRICT_CONCURRENCY: minimal
 
