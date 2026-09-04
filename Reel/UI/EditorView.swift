@@ -199,6 +199,13 @@ struct EditorView: View {
             let h = w / aspect
             ZStack {
                 RC.stage
+                if let err = model.errorText {
+                    Text(err).font(.system(size: 12)).foregroundStyle(RC.live)
+                        .padding(10).background(RC.raised, in: RoundedRectangle(cornerRadius: 8))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 12)
+                        .zIndex(2)
+                }
                 ZStack {
                     PlayerLayerView(player: model.player)
                     if model.state.aspect == .r9x16 || model.state.aspect == .r4x5 {

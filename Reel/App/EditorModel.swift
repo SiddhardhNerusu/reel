@@ -525,22 +525,42 @@ final class EditorModel: ObservableObject {
             let aDsts = aSrcs.compactMap { _ in
                 composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
             }
+            // Clamp to what the track actually contains: project.duration comes from the recorder's
+            // PTS bookkeeping and can exceed the muxed track by a frame, and insertTimeRange
+            // throws (silently blank preview) if a range pokes past the end.
+            let trackRange = try await vSrc.load(.timeRange)
+            let trackEnd = trackRange.end.seconds
+            var kept = remap.keptRanges.compactMap { r -> ClosedRange<Double>? in
+                let lo = max(r.lowerBound, trackRange.start.seconds), hi = min(r.upperBound, trackEnd)
+                return hi - lo > 0.02 ? lo...hi : nil
+            }
+            // Never build an empty composition (the player would wait forever): fall back to the trim.
+            if kept.isEmpty {
+                kept = [max(0, min(state.trimIn, trackEnd - 0.1))...max(0.1, min(state.trimOut, trackEnd))]
+            }
             var at = CMTime.zero
-            for r in remap.keptRanges {
+            for r in kept {
                 let range = CMTimeRange(start: CMTime(seconds: r.lowerBound, preferredTimescale: 600),
                                         end: CMTime(seconds: r.upperBound, preferredTimescale: 600))
                 try vDst.insertTimeRange(range, of: vSrc, at: at)
                 for (i, a) in aSrcs.enumerated() where i < aDsts.count {
-                    try? aDsts[i].insertTimeRange(range, of: a, at: at)
+                    let aRange = (try? await a.load(.timeRange)) ?? range
+                    let clipped = CMTimeRangeGetIntersection(range, otherRange: aRange)
+                    if clipped.duration.seconds > 0.02 { try? aDsts[i].insertTimeRange(clipped, of: a, at: at) }
                 }
                 at = at + range.duration
             }
             vDst.preferredTransform = try await vSrc.load(.preferredTransform)
 
-            let comp = try await PreviewComposition.make(asset: composition, document: editedDoc(), tracks: tracks,
+            // A player item built from a MUTABLE composition renders one frame but won't play
+            // reliably — hand the item AND the video composition the same immutable snapshot.
+            guard let immutable = composition.copy() as? AVComposition else {
+                errorText = "Preview failed: composition copy"; return
+            }
+            let comp = try await PreviewComposition.make(asset: immutable, document: editedDoc(), tracks: tracks,
                                                          compositor: compositor, outputSize: outputSize,
                                                          editedTimeline: true)
-            let item = AVPlayerItem(asset: composition)
+            let item = AVPlayerItem(asset: immutable)
             item.videoComposition = comp
             player.replaceCurrentItem(with: item)
             seek(to: resumeAt)
