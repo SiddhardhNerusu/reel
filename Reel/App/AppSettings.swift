@@ -11,8 +11,10 @@ enum AppSettings {
         get { d.object(forKey: "countdown") as? Int ?? 3 }
         set { d.set(newValue, forKey: "countdown") }
     }
+    /// Default OFF: hiding desktop icons makes clicks on desktop files look like clicks on nothing
+    /// in the take (owner hit exactly this). Opt in from Settings when the desktop is clutter.
     static var hideDesktopWhileRecording: Bool {
-        get { d.object(forKey: "hideDesktop") as? Bool ?? true }
+        get { d.object(forKey: "hideDesktop") as? Bool ?? false }
         set { d.set(newValue, forKey: "hideDesktop") }
     }
     static var captureMicrophone: Bool {

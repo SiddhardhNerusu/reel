@@ -22,6 +22,8 @@ final class RecordingCoordinator: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lastProject: ReelDocument?
+    /// The project currently open in the editor (nil ⇒ launcher). One window, swapped in place.
+    @Published var editorDoc: ReelDocument?
     @Published var exportProgress: Double = 0
     @Published private(set) var recordingStartedAt: Date?
     @Published private(set) var isPaused = false

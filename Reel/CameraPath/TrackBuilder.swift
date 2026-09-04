@@ -19,7 +19,8 @@ enum TrackBuilder {
         let remap = TimeRemap(trimIn: project.trimIn, trimOut: project.effectiveTrimOut, cuts: cuts)
         let dur = remap.editedDuration
         let src = project.geometry.sourceSize
-        let cfg = config ?? ZoomPlan.config(motionDial: project.motionDial ?? 0.5)
+        let cfg = config ?? ZoomPlan.config(motionDial: project.motionDial ?? 0.5,
+                                            enabled: project.zoomEnabled ?? true)
 
         let clippedEvents: [InputEvent] = events.compactMap { e in
             guard let nt = remap.output(e.t) else { return nil }

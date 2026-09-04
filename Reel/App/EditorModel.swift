@@ -26,6 +26,10 @@ final class EditorModel: ObservableObject {
         var background: BackgroundStyle
         var removeSilence: Bool
         var captionsEnabled: Bool
+        var zoomEnabled: Bool
+        var manualCuts: [ClosedRange<Double>]      // raw seconds
+        var restoredCuts: [ClosedRange<Double>]    // auto-cuts the user clicked away (raw)
+        var splits: [Double]                       // blade points (raw)
         var overrides: [CameraOverride]
         var title: String?
     }
@@ -35,6 +39,11 @@ final class EditorModel: ObservableObject {
     }
     @Published private(set) var zoomSegments: [ZoomSegment] = []
     @Published var selectedSegmentID: String?
+    /// Clip piece (between blade points / cuts) selected on the strip — ⌫ removes it.
+    @Published var selectedPieceIndex: Int?
+    /// Mark in / mark out (EDITED-timeline seconds) — I / O, then Cut.
+    @Published var inPoint: Double?
+    @Published var outPoint: Double?
 
     private var undoStack: [EditState] = []
     private var redoStack: [EditState] = []
@@ -83,6 +92,10 @@ final class EditorModel: ObservableObject {
                                background: p.theme.background,
                                removeSilence: p.autoRemoveSilence,
                                captionsEnabled: p.captionsEnabled ?? false,
+                               zoomEnabled: p.zoomEnabled ?? true,
+                               manualCuts: p.manualCuts ?? [],
+                               restoredCuts: p.restoredCuts ?? [],
+                               splits: p.splits ?? [],
                                overrides: p.overrides,
                                title: p.title)
         addTimeObserver()
@@ -96,7 +109,35 @@ final class EditorModel: ObservableObject {
     }
 
     var totalDuration: Double { doc.project.duration }
-    var editedDuration: Double { max(0, state.trimOut - state.trimIn) }
+
+    // MARK: Edited timeline (trim + cuts) — the preview PLAYS this timeline (§ preview == export)
+
+    /// Auto-cuts (silence ∧ idle) in RAW seconds, minus the ones the user restored.
+    var autoCuts: [ClosedRange<Double>] {
+        state.removeSilence ? TimeRemap.subtract(silenceCutsPreview, state.restoredCuts) : []
+    }
+    /// Everything removed from the take, normalized, raw seconds.
+    var effectiveCuts: [ClosedRange<Double>] { TimeRemap.normalize(autoCuts + state.manualCuts) }
+    var remap: TimeRemap { TimeRemap(trimIn: state.trimIn, trimOut: state.trimOut, cuts: effectiveCuts) }
+    var editedDuration: Double { remap.editedDuration }
+
+    func rawTime(fromEdited t: Double) -> Double { remap.rawTime(forOutput: t) }
+    func editedTime(fromRaw r: Double) -> Double { remap.nearestOutput(r) }
+    /// Where the playhead sits on the RAW strip (skips over cut columns).
+    var playheadRaw: Double { rawTime(fromEdited: currentTime) }
+
+    /// Kept raw spans split at blade points — the selectable pieces on the clip strip.
+    var pieces: [ClosedRange<Double>] {
+        var out: [ClosedRange<Double>] = []
+        for r in remap.keptRanges {
+            var lo = r.lowerBound
+            for sp in state.splits.sorted() where sp > lo + 0.05 && sp < r.upperBound - 0.05 {
+                out.append(lo...sp); lo = sp
+            }
+            out.append(lo...r.upperBound)
+        }
+        return out
+    }
     var displayTitle: String { state.title ?? doc.url.deletingPathExtension().lastPathComponent }
 
     var outputAspect: CGFloat {
@@ -131,25 +172,98 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    private var shuttleRate: Float = 0
+
     func togglePlay() {
-        if player.rate > 0 { player.pause() }
+        shuttleRate = 0
+        if player.rate != 0 { player.pause() }
         else {
-            if currentTime >= totalDuration - 0.05 { seek(to: 0) }
+            if currentTime >= editedDuration - 0.05 { seek(to: 0) }
             player.play()
         }
     }
 
+    /// J / K / L shuttle (Final Cut / Premiere convention): J reverse, K pause, L forward;
+    /// repeating J or L doubles the speed up to 8×.
+    func shuttle(_ direction: Int) {
+        guard direction != 0 else { player.pause(); shuttleRate = 0; return }
+        let sameWay = (direction < 0 && shuttleRate < 0) || (direction > 0 && shuttleRate > 0)
+        let magnitude: Float = sameWay ? min(abs(shuttleRate) * 2, 8) : 1
+        shuttleRate = Float(direction) * magnitude
+        if direction > 0, currentTime >= editedDuration - 0.05 { seek(to: 0) }
+        player.rate = shuttleRate
+    }
+
+    /// All seeks are in EDITED-timeline seconds (what the player plays).
     func seek(to t: Double) {
-        player.seek(to: CMTime(seconds: max(0, min(t, totalDuration)), preferredTimescale: 600),
+        player.seek(to: CMTime(seconds: max(0, min(t, editedDuration)), preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
-    func scrub(to t: Double) { if player.rate > 0 { player.pause() }; seek(to: t) }
+    func scrub(to t: Double) { if player.rate != 0 { player.pause(); shuttleRate = 0 }; seek(to: t) }
+    /// Two-finger scroll over the preview / timeline (scrubbing like an NLE jog).
+    func scrub(by dt: Double) { scrub(to: currentTime + dt) }
+    func goToStart() { scrub(to: 0) }
+    func goToEnd() { scrub(to: max(0, editedDuration - 1.0 / Double(max(1, doc.project.fps)))) }
 
     func step(_ direction: Int, frames: Int = 1) {
         let dt = Double(frames) / Double(max(1, doc.project.fps))
-        if player.rate > 0 { player.pause() }
-        seek(to: currentTime + Double(direction) * dt)
+        scrub(to: currentTime + Double(direction) * dt)
+    }
+
+    // MARK: Cutting & splicing (I/O → Cut, B blade, ⌫ delete piece)
+
+    func markIn() {
+        inPoint = currentTime
+        if let o = outPoint, o <= currentTime { outPoint = nil }
+    }
+    func markOut() {
+        outPoint = currentTime
+        if let i = inPoint, i >= currentTime { inPoint = nil }
+    }
+    var canCutMarkedRange: Bool {
+        if let i = inPoint, let o = outPoint { return o > i + 0.05 }
+        return false
+    }
+    /// Remove everything between the in and out marks.
+    func cutMarkedRange() {
+        guard let i = inPoint, let o = outPoint, o > i + 0.05 else { return }
+        pushUndo()
+        addManualCut(rawTime(fromEdited: i)...rawTime(fromEdited: o))
+        inPoint = nil; outPoint = nil
+    }
+    private func addManualCut(_ r: ClosedRange<Double>) {
+        let keepAt = editedTime(fromRaw: r.lowerBound)
+        state.manualCuts = TimeRemap.normalize(state.manualCuts + [r])
+        selectedPieceIndex = nil
+        seek(to: min(keepAt, editedDuration))
+    }
+    /// Blade: split the clip at the playhead so the two sides become separately deletable.
+    func blade() {
+        let r = playheadRaw
+        guard r > state.trimIn + 0.05, r < state.trimOut - 0.05 else { return }
+        guard !state.splits.contains(where: { abs($0 - r) < 0.05 }) else { return }
+        pushUndo()
+        state.splits = (state.splits + [r]).sorted()
+    }
+    func deleteSelectedPiece() {
+        guard let i = selectedPieceIndex, pieces.indices.contains(i) else { return }
+        pushUndo()
+        addManualCut(pieces[i])
+    }
+    /// Click a hatched column to bring that span back.
+    func restoreCut(_ c: ClosedRange<Double>) {
+        pushUndo()
+        if state.manualCuts.contains(where: { $0.lowerBound < c.upperBound && $0.upperBound > c.lowerBound }) {
+            state.manualCuts = TimeRemap.subtract(state.manualCuts, [c])
+        } else {
+            state.restoredCuts = TimeRemap.normalize(state.restoredCuts + [c])
+        }
+    }
+    func clearManualCuts() {
+        guard !state.manualCuts.isEmpty || !state.splits.isEmpty else { return }
+        pushUndo()
+        state.manualCuts = []; state.splits = []; selectedPieceIndex = nil
     }
 
     /// Raw filmstrip frames for the clip strip (1 frame / ~5 s, §2.4).
@@ -173,16 +287,25 @@ final class EditorModel: ObservableObject {
     }
 
     /// Silence spans for the timeline's hatched CUT columns + the Audio section summary.
+    private var autoCutsLoaded = false
+
+    /// Auto-cuts (silence ∧ idle) in RAW seconds — drawn as hatched columns AND removed from
+    /// the preview timeline, so what you see is what exports.
     func loadSilencePreview() async {
-        guard state.removeSilence else { silenceCutsPreview = []; return }
-        let project = editedProject()
+        guard state.removeSilence else { return }
         let silence = await AudioSilence.intervals(url: doc.rawMovieURL)
         silenceCutsPreview = IdleCutPlanner.cuts(eventTimes: doc.events.map(\.t),
-                                                 duration: project.editedDuration, silence: silence)
+                                                 duration: totalDuration, silence: silence)
+        autoCutsLoaded = true
+        await rebuildPreview()
+    }
+
+    private func ensureAutoCutsLoaded() async {
+        if state.removeSilence, !autoCutsLoaded { await loadSilencePreview() }
     }
 
     var silenceSavings: Double {
-        silenceCutsPreview.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
+        autoCuts.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
     }
 
     // MARK: Captions (on-device, cached in captions.json)
@@ -220,11 +343,13 @@ final class EditorModel: ObservableObject {
 
     // MARK: Zoom segments (§2.4 zoom track)
 
-    private var solverConfig: SolverConfig { ZoomPlan.config(motionDial: state.motionDial) }
+    private var solverConfig: SolverConfig {
+        ZoomPlan.config(motionDial: state.motionDial, enabled: state.zoomEnabled)
+    }
 
-    /// Events clipped to the current trim (the editor timeline is the trimmed timeline).
+    /// Events on the EDITED timeline (trim + cuts applied).
     private var clippedEvents: [InputEvent] {
-        let remap = TimeRemap(trimIn: state.trimIn, trimOut: state.trimOut, cuts: [])
+        let remap = self.remap
         return doc.events.compactMap { e in
             guard let nt = remap.output(e.t) else { return nil }
             var c = e; c.t = nt; return c
@@ -232,6 +357,9 @@ final class EditorModel: ObservableObject {
     }
 
     func recomputeSegments() {
+        guard state.zoomEnabled else {
+            zoomSegments = []; selectedSegmentID = nil; return
+        }
         let auto = ZoomPlan.autoClusters(events: clippedEvents,
                                          sourceSize: doc.project.geometry.sourceSize,
                                          config: solverConfig)
@@ -326,6 +454,10 @@ final class EditorModel: ObservableObject {
         p.cursorSmoothing = state.cursorSmoothing
         p.clickRipples = state.clickRipples
         p.captionsEnabled = state.captionsEnabled
+        p.zoomEnabled = state.zoomEnabled
+        p.manualCuts = state.manualCuts
+        p.restoredCuts = state.restoredCuts
+        p.splits = state.splits
         return p
     }
 
@@ -370,22 +502,49 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// The preview plays the EDITED timeline: an AVMutableComposition of the kept raw spans
+    /// (trim minus every cut), so cuts are audible and visible while scrubbing — not export-only.
+    /// The video composition's time is then edited time directly.
     func rebuildPreview() async {
         let project = editedProject()
         let outputSize = Self.previewSize(for: RecordingCoordinator.outputSize(for: project))
+        let cuts = effectiveCuts
         let tracks = TrackBuilder.build(project: project, events: doc.events, cursor: doc.cursor,
-                                        captions: doc.captions, config: solverConfig)
+                                        cuts: cuts, captions: doc.captions, config: solverConfig)
         let asset = AVURLAsset(url: doc.rawMovieURL)
         do {
-            let wasPlaying = player.rate > 0
+            let wasPlaying = player.rate != 0
             let resumeAt = currentTime
-            let comp = try await PreviewComposition.make(asset: asset, document: editedDoc(), tracks: tracks,
-                                                         compositor: compositor, outputSize: outputSize)
-            let item = AVPlayerItem(asset: asset)
+            let composition = AVMutableComposition()
+            guard let vSrc = try await asset.loadTracks(withMediaType: .video).first,
+                  let vDst = composition.addMutableTrack(withMediaType: .video,
+                                                         preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                errorText = "Preview failed: no video track"; return
+            }
+            let aSrcs = try await asset.loadTracks(withMediaType: .audio)
+            let aDsts = aSrcs.compactMap { _ in
+                composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            }
+            var at = CMTime.zero
+            for r in remap.keptRanges {
+                let range = CMTimeRange(start: CMTime(seconds: r.lowerBound, preferredTimescale: 600),
+                                        end: CMTime(seconds: r.upperBound, preferredTimescale: 600))
+                try vDst.insertTimeRange(range, of: vSrc, at: at)
+                for (i, a) in aSrcs.enumerated() where i < aDsts.count {
+                    try? aDsts[i].insertTimeRange(range, of: a, at: at)
+                }
+                at = at + range.duration
+            }
+            vDst.preferredTransform = try await vSrc.load(.preferredTransform)
+
+            let comp = try await PreviewComposition.make(asset: composition, document: editedDoc(), tracks: tracks,
+                                                         compositor: compositor, outputSize: outputSize,
+                                                         editedTimeline: true)
+            let item = AVPlayerItem(asset: composition)
             item.videoComposition = comp
             player.replaceCurrentItem(with: item)
             seek(to: resumeAt)
-            if wasPlaying { player.play() }
+            if wasPlaying { player.rate = shuttleRate == 0 ? 1 : shuttleRate }
             errorText = nil
         } catch {
             errorText = "Preview failed: \(error.localizedDescription)"
@@ -409,7 +568,7 @@ final class EditorModel: ObservableObject {
 
     /// Rough size estimate for the configure sheet (bitrate table × edited duration).
     var exportEstimate: String {
-        let dur = max(0, editedDuration - silenceSavings)
+        let dur = editedDuration
         let mbps: Double
         switch exportFormat {
         case .mp4:    mbps = exportResolution == .r4k ? 16 : (exportResolution == .r1440 ? 9 : 6)
@@ -421,7 +580,7 @@ final class EditorModel: ObservableObject {
     }
 
     var exportDurationLabel: String {
-        let dur = max(0, editedDuration - silenceSavings)
+        let dur = editedDuration
         let s = Int(dur.rounded())
         return String(format: "%d:%02d after cuts", s / 60, s % 60)
     }
@@ -431,12 +590,8 @@ final class EditorModel: ObservableObject {
         exportProgress = 0
         defer { isExporting = false }
         let project = editedProject()
-        var cuts: [ClosedRange<Double>] = []
-        if project.autoRemoveSilence {
-            let silence = await AudioSilence.intervals(url: doc.rawMovieURL)
-            cuts = IdleCutPlanner.cuts(eventTimes: doc.events.map(\.t),
-                                       duration: project.editedDuration, silence: silence)
-        }
+        await ensureAutoCutsLoaded()
+        let cuts = effectiveCuts      // identical to what the preview is playing
         let tracks = TrackBuilder.build(project: project, events: doc.events, cursor: doc.cursor,
                                         cuts: cuts, captions: doc.captions, config: solverConfig)
         let exporter = Exporter(compositor: compositor)

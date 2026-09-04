@@ -46,6 +46,14 @@ struct ReelProject: Codable, Equatable {
     var clickRipples: Bool? = nil
     /// Burned-in captions on/off (lines cached in captions.json).
     var captionsEnabled: Bool? = nil
+    /// Auto-zoom master switch (nil ⇒ on).
+    var zoomEnabled: Bool? = nil
+    /// Manual cuts (raw seconds) — blade + delete, or mark in/out → Cut.
+    var manualCuts: [ClosedRange<Double>]? = nil
+    /// Auto-cuts (silence/idle) the user restored by clicking them away (raw seconds).
+    var restoredCuts: [ClosedRange<Double>]? = nil
+    /// Blade points (raw seconds) splitting the clip into selectable pieces.
+    var splits: [Double]? = nil
 
     var effectiveTrimOut: Double { trimOut < 0 ? duration : min(trimOut, duration) }
     var editedDuration: Double { max(0, effectiveTrimOut - trimIn) }

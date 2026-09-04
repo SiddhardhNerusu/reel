@@ -105,12 +105,26 @@ enum ZoomPlan {
     }
 
     /// One dial: zoom speed, ease and hold, tuned together (§2.4 Motion). 0 calm … 1 dynamic.
-    static func config(motionDial: Double) -> SolverConfig {
-        let d = min(1, max(0, motionDial))
+    /// One dial with a REAL spread (owner feedback: the old range all felt like "too much").
+    /// Calm = fewer, gentler zooms that linger; Dynamic = tighter, faster, more of them.
+    static func config(motionDial: Double, enabled: Bool = true) -> SolverConfig {
         var c = SolverConfig.default
-        c.omega = 9 + d * 8            // spring snappiness: 9 (dramatic) → 17 (snappy)
-        c.minHold = 1.2 - d * 0.6      // hold: 1.2 s → 0.6 s
-        c.lead = 0.38 - d * 0.14       // arrives a touch earlier when calm
+        guard enabled else {
+            c.minScale = 1; c.maxScale = 1        // camera stays at rest — no zoom at all
+            return c
+        }
+        // Symmetric around the MIDPOINT, which is exactly the verified SolverConfig defaults —
+        // the render smoke test pins that. Widening clustering further than this merges distant
+        // clicks into one frame-sized bbox that trips the skip-zoom rule ("calm" ⇒ no zoom).
+        let k = min(1, max(0, motionDial)) - 0.5          // −0.5 (calm) … +0.5 (dynamic)
+        let d0 = SolverConfig.default
+        c.minScale = d0.minScale + k * 0.6                 // 1.1× … 1.7×
+        c.maxScale = d0.maxScale + k * 1.2                 // 1.6× … 2.8×
+        c.idleGap = d0.idleGap - k * 0.3                   // 0.95 … 0.65
+        c.mergeWindow = d0.mergeWindow - k * 0.2           // 0.45 … 0.25
+        c.minHold = d0.minHold - k * 1.2                   // 1.5 s … 0.3 s
+        c.omega = d0.omega + k * 14                        // 6 (glide) … 20 (snap)
+        c.lead = d0.lead - k * 0.2                         // 0.40 … 0.20
         return c
     }
 }

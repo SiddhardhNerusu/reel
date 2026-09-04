@@ -8,35 +8,26 @@ import SwiftUI
 @main
 struct ReelApp: App {
     @StateObject private var coordinator = RecordingCoordinator()
-    @Environment(\.openWindow) private var openWindow
     private let statusItem = StatusItemController()
 
     var body: some Scene {
         // Launcher (Darkroom 1a/1b) — fixed 800pt, hidden titlebar.
+        // ONE window: launcher ⇄ editor swap in place (owner feedback — no second window).
         WindowGroup {
-            ContentView()
+            RootView()
                 .environmentObject(coordinator)
                 .preferredColorScheme(.dark)   // committed studio look
                 .onAppear {
                     HotKeys.shared.register { [weak coordinator] in coordinator?.hotkeyToggle() }
                     statusItem.attach(coordinator)
                 }
-                .onChange(of: coordinator.lastProject?.url) { _, url in
+                .onChange(of: coordinator.lastProject?.url) { _, _ in
                     // A finished take opens straight into the editor (§2.3 Stop & Edit).
-                    if let url { openWindow(value: url) }
+                    if let doc = coordinator.lastProject { coordinator.editorDoc = doc }
                 }
         }
         .windowStyle(.hiddenTitleBar)           // custom chrome; traffic lights float over content
-        .windowResizability(.contentSize)
-
-        // Editor (Darkroom 1d) — its own window per project, min 1280×800.
-        WindowGroup("Editor", for: URL.self) { $url in
-            if let url, let doc = try? ReelDocument.open(url) {
-                EditorView(model: EditorModel(doc: doc))
-                    .preferredColorScheme(.dark)
-            }
-        }
-        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentMinSize)
 
         // Settings (Darkroom 1f).
         Settings {

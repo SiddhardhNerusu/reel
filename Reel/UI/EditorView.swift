@@ -5,6 +5,11 @@ import SwiftUI
 /// toolbar 52 / preview+inspector / timeline 164. The preview is the hero; chrome stays matte.
 struct EditorView: View {
     @ObservedObject var model: EditorModel
+    var onBack: () -> Void = {}
+    @FocusState private var focused: Bool
+    @State private var previewFrame: CGRect = .zero
+    @State private var timelineFrame: CGRect = .zero
+    @State private var scrollMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,24 +26,82 @@ struct EditorView: View {
             EditorTimeline(model: model)
                 .frame(height: 164)
                 .background(RC.base)
+                .background(GeometryReader { g in
+                    Color.clear.onAppear { timelineFrame = g.frame(in: .global) }
+                        .onChange(of: g.frame(in: .global)) { _, f in timelineFrame = f }
+                })
         }
         .background(RC.base)
         .frame(minWidth: 1280, minHeight: 800)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
         .task {
+            focused = true
             await model.rebuildPreview()
             await model.loadFilmstrip()
             await model.loadSilencePreview()
         }
-        .onDisappear { model.teardown() }
+        .onAppear { installScrollScrub() }
+        .onDisappear { model.teardown(); removeScrollScrub() }
         .sheet(isPresented: $model.showExportSheet) { ExportSheet(model: model) }
+        // NLE conventions (Final Cut / Premiere): space, J K L, ← →, ⇧← ⇧→, I O, B, ⌫, Home/End.
         .onKeyPress(.space) { model.togglePlay(); return .handled }
         .onKeyPress(.deleteForward) { deleteSelected(); return .handled }
-        .onKeyPress(.leftArrow) { model.step(-1); return .handled }
-        .onKeyPress(.rightArrow) { model.step(1); return .handled }
+        .onKeyPress(.delete) { deleteSelected(); return .handled }
+        .onKeyPress(.home) { model.goToStart(); return .handled }
+        .onKeyPress(.end) { model.goToEnd(); return .handled }
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
+            let frames = press.modifiers.contains(.shift) ? 10 : 1
+            model.step(press.key == .leftArrow ? -1 : 1, frames: frames)
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "jklJKLioIObB")) { press in
+            switch press.characters.lowercased() {
+            case "j": model.shuttle(-1)
+            case "k": model.shuttle(0)
+            case "l": model.shuttle(1)
+            case "i": model.markIn()
+            case "o": model.markOut()
+            case "b": model.blade()
+            default: return .ignored
+            }
+            return .handled
+        }
+        .onKeyPress(.escape) { model.inPoint = nil; model.outPoint = nil; model.selectedPieceIndex = nil; return .handled }
     }
 
     private func deleteSelected() {
         if let id = model.selectedSegmentID { model.deleteSegment(id) }
+        else if model.selectedPieceIndex != nil { model.deleteSelectedPiece() }
+        else if model.canCutMarkedRange { model.cutMarkedRange() }
+    }
+
+    // Two-finger horizontal scroll over the preview or timeline scrubs (jog wheel feel).
+    // A local monitor sees the wheel before any view; the frames are SwiftUI global (top-left).
+    private func installScrollScrub() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak model] event in
+            guard let model, let window = event.window, window.isKeyWindow,
+                  let content = window.contentView else { return event }
+            let p = event.locationInWindow
+            let pt = CGPoint(x: p.x, y: content.bounds.height - p.y)
+            let dx = event.scrollingDeltaX != 0 ? event.scrollingDeltaX : 0
+            guard abs(dx) > 0.01 else { return event }
+            if previewFrame.contains(pt) {
+                MainActor.assumeIsolated { model.scrub(by: Double(dx) * 0.02) }   // ~1 s per 50 pt
+                return nil
+            }
+            if timelineFrame.contains(pt) {
+                let px = max(1, (timelineFrame.width - 170 - 24) / max(0.1, model.totalDuration))
+                MainActor.assumeIsolated { model.scrub(by: Double(dx) / Double(px)) }
+                return nil
+            }
+            return event
+        }
+    }
+    private func removeScrollScrub() {
+        if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
     }
 
     // MARK: Toolbar (§2.4)
@@ -49,6 +112,18 @@ struct EditorView: View {
     private var toolbar: some View {
         HStack(spacing: 14) {
             Spacer().frame(width: 64)   // traffic lights
+            Button(action: onBack) {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
+                    Text("Back").font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(RC.ink2)
+                .padding(.horizontal, 9).padding(.vertical, 5)
+                .background(RC.raised, in: Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("[", modifiers: .command)
             if renaming {
                 TextField("", text: $renameText)
                     .textFieldStyle(.plain)
@@ -133,6 +208,10 @@ struct EditorView: View {
                 }
                 .frame(width: w, height: h)
                 .clipShape(RoundedRectangle(cornerRadius: RC.rCard))
+                .background(GeometryReader { g in
+                    Color.clear.onAppear { previewFrame = g.frame(in: .global) }
+                        .onChange(of: g.frame(in: .global)) { _, f in previewFrame = f }
+                })
                 .overlay(RoundedRectangle(cornerRadius: RC.rCard).stroke(Color.white.opacity(0.06), lineWidth: 1))
                 .shadow(color: .black.opacity(0.45), radius: 70, y: 30)
                 .shadow(color: .black.opacity(0.30), radius: 14, y: 4)
@@ -262,27 +341,37 @@ struct InspectorView: View {
     @AppStorage("inspector.motion") private var motionOpen = true
     @AppStorage("inspector.cursor") private var cursorOpen = false
     @AppStorage("inspector.frame") private var frameOpen = false
-    @AppStorage("inspector.background") private var backgroundOpen = false
     @AppStorage("inspector.audio") private var audioOpen = false
     @AppStorage("inspector.captions") private var captionsOpen = false
 
     var body: some View {
         ScrollView {
             VStack(spacing: 2) {
-                section("Motion", summary: "auto", isOpen: $motionOpen) {
-                    VStack(alignment: .leading, spacing: 8) {
+                section("Motion", summary: motionSummary, isOpen: $motionOpen) {
+                    VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Calm").font(.system(size: 10.5)).foregroundStyle(RC.ink3)
+                            Text("Auto-zoom").font(RC.body).foregroundStyle(RC.ink)
                             Spacer()
-                            Text("Dynamic").font(.system(size: 10.5)).foregroundStyle(RC.ink3)
+                            ReelToggle(isOn: Binding(
+                                get: { model.state.zoomEnabled },
+                                set: { v in model.pushUndo(); model.state.zoomEnabled = v }))
                         }
-                        ReelSlider(value: Binding(
-                            get: { model.state.motionDial },
-                            set: { model.state.motionDial = $0 }),
-                            onEditingChanged: { if $0 { model.pushUndo() } })
-                        Text("One dial: zoom speed, ease and hold, tuned together.")
-                            .font(.system(size: 10.5)).foregroundStyle(RC.ink4)
-                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Calm").font(.system(size: 10.5)).foregroundStyle(RC.ink3)
+                                Spacer()
+                                Text("Dynamic").font(.system(size: 10.5)).foregroundStyle(RC.ink3)
+                            }
+                            ReelSlider(value: Binding(
+                                get: { model.state.motionDial },
+                                set: { model.state.motionDial = $0 }),
+                                onEditingChanged: { if $0 { model.pushUndo() } })
+                            Text("Calm: fewer, gentler zooms that linger. Dynamic: tighter, faster, more of them.")
+                                .font(.system(size: 10.5)).foregroundStyle(RC.ink4)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .opacity(model.state.zoomEnabled ? 1 : 0.4)
+                        .disabled(!model.state.zoomEnabled)
                     }
                 }
                 section("Cursor", summary: String(format: "%.1f×", model.state.cursorScale), isOpen: $cursorOpen) {
@@ -325,26 +414,32 @@ struct InspectorView: View {
                                 }
                             }
                         }
-                    }
-                }
-                section("Background", summary: backgroundSummary, isOpen: $backgroundOpen) {
-                    VStack(spacing: 10) {
-                        HStack(spacing: 8) {
-                            ForEach(Array(ThemePresets.all.enumerated()), id: \.offset) { _, preset in
-                                BackgroundSwatch(style: preset.background,
-                                                 selected: model.state.background == preset.background) {
-                                    model.pushUndo()
-                                    model.state.background = preset.background
+                        // Backdrop lives inside Frame and only when there is padding to colour —
+                        // at 0% padding there is no backdrop, so the swatches would do nothing.
+                        if model.state.paddingFraction > 0.005 {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Backdrop").font(.system(size: 12)).foregroundStyle(RC.ink2)
+                                HStack(spacing: 8) {
+                                    ForEach(Array(ThemePresets.all.enumerated()), id: \.offset) { _, preset in
+                                        BackgroundSwatch(style: preset.background,
+                                                         selected: model.state.background == preset.background) {
+                                            model.pushUndo()
+                                            model.state.background = preset.background
+                                        }
+                                    }
+                                    Button { pickCustomBackground() } label: {
+                                        Image(systemName: "photo").font(.system(size: 11))
+                                            .foregroundStyle(RC.ink3)
+                                            .frame(width: 32, height: 32)
+                                            .overlay(RoundedRectangle(cornerRadius: 7)
+                                                .strokeBorder(RC.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Custom image")
                                 }
                             }
+                            .padding(.top, 4)
                         }
-                        Button("Custom — image or color…") { pickCustomBackground() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11.5)).foregroundStyle(RC.ink3)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 28)
-                            .overlay(RoundedRectangle(cornerRadius: 7)
-                                .strokeBorder(RC.hairline, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
                     }
                 }
                 section("Captions", summary: captionSummary, isOpen: $captionsOpen) {
@@ -367,16 +462,40 @@ struct InspectorView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                section("Audio", summary: audioSummary, isOpen: $audioOpen) {
-                    HStack {
-                        Text("Remove silence").font(RC.body).foregroundStyle(RC.ink)
-                        Spacer()
-                        ReelToggle(isOn: Binding(
-                            get: { model.state.removeSilence },
-                            set: { newValue in
-                                model.pushUndo(); model.state.removeSilence = newValue
-                                Task { await model.loadSilencePreview() }
-                            }))
+                section("Cuts", summary: cutsSummary, isOpen: $audioOpen) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Auto-cut dead air").font(RC.body).foregroundStyle(RC.ink)
+                                Text("Silence with no clicks — click a hatched column to keep it.")
+                                    .font(.system(size: 10.5)).foregroundStyle(RC.ink4)
+                            }
+                            Spacer()
+                            ReelToggle(isOn: Binding(
+                                get: { model.state.removeSilence },
+                                set: { newValue in
+                                    model.pushUndo(); model.state.removeSilence = newValue
+                                    Task { await model.loadSilencePreview() }
+                                }))
+                        }
+                        HStack(spacing: 8) {
+                            Button("Cut in → out") { model.cutMarkedRange() }
+                                .buttonStyle(SecondaryButtonStyle(height: 28))
+                                .disabled(!model.canCutMarkedRange)
+                            Button("Blade") { model.blade() }
+                                .buttonStyle(SecondaryButtonStyle(height: 28))
+                            Spacer()
+                            if !model.state.manualCuts.isEmpty || !model.state.splits.isEmpty {
+                                Button("Reset") { model.clearManualCuts() }.buttonStyle(.reelQuiet)
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            shortcutRow("I  /  O", "mark in / out at the playhead")
+                            shortcutRow("B", "blade — split at the playhead")
+                            shortcutRow("⌫", "delete selected piece, zoom, or in→out")
+                            shortcutRow("J  K  L", "shuttle back / pause / forward")
+                            shortcutRow("2-finger swipe", "scrub over the preview or timeline")
+                        }
                     }
                 }
             }
@@ -389,8 +508,26 @@ struct InspectorView: View {
         return s < 0.1 ? "off" : (s < 0.4 ? "low" : (s < 0.75 ? "med" : "high"))
     }
 
-    private var backgroundSummary: String {
-        ThemePresets.all.first { $0.background == model.state.background }?.name.lowercased() ?? "custom"
+    private var motionSummary: String {
+        guard model.state.zoomEnabled else { return "off" }
+        let d = model.state.motionDial
+        return d < 0.33 ? "calm" : (d > 0.66 ? "dynamic" : "balanced")
+    }
+
+    private var cutsSummary: String {
+        let auto = model.silenceSavings
+        let manual = model.state.manualCuts.count
+        var parts: [String] = []
+        if model.state.removeSilence, auto > 0.05 { parts.append(String(format: "−%.1fs auto", auto)) }
+        if manual > 0 { parts.append("\(manual) manual") }
+        return parts.isEmpty ? "none" : parts.joined(separator: " · ")
+    }
+
+    private func shortcutRow(_ key: String, _ what: String) -> some View {
+        HStack(spacing: 8) {
+            Text(key).font(RC.mono(10)).foregroundStyle(RC.ink3).frame(width: 90, alignment: .leading)
+            Text(what).font(.system(size: 10.5)).foregroundStyle(RC.ink4)
+        }
     }
 
     private var captionSummary: String {
@@ -399,10 +536,6 @@ struct InspectorView: View {
         return "off"
     }
 
-    private var audioSummary: String {
-        guard model.state.removeSilence else { return "off" }
-        return String(format: "silence off −%.1fs", model.silenceSavings)
-    }
 
     private func pickCustomBackground() {
         let panel = NSOpenPanel()
@@ -535,7 +668,7 @@ struct EditorTimeline: View {
             .hoverRaise()
             HStack(spacing: 0) {
                 Text(timecode(model.currentTime)).font(RC.mono(11.5)).foregroundStyle(RC.ink2)
-                Text(" / " + timecode(model.totalDuration)).font(RC.mono(11.5)).foregroundStyle(RC.ink.opacity(0.28))
+                Text(" / " + timecode(model.editedDuration)).font(RC.mono(11.5)).foregroundStyle(RC.ink.opacity(0.28))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -545,23 +678,52 @@ struct EditorTimeline: View {
         String(format: "%02d:%04.1f", Int(t) / 60, t.truncatingRemainder(dividingBy: 60))
     }
 
+    /// Label interval that keeps labels ≥ ~64 pt apart; minor ticks at a fifth of it.
+    private func rulerStep(px: CGFloat) -> Double {
+        for step in [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0] where CGFloat(step) * px >= 64 { return step }
+        return 120
+    }
+
     private func ruler(px: CGFloat, dur: Double) -> some View {
-        ZStack(alignment: .topLeading) {
-            Color.clear.frame(height: 14)
-            ForEach(0...max(1, Int(dur / 5)), id: \.self) { i in
-                let t = Double(i) * 5
-                if t <= dur {
-                    Text(String(format: "%d:%02d", Int(t) / 60, Int(t) % 60))
-                        .font(RC.mono(9.5))
-                        .foregroundStyle(RC.ink.opacity(0.28))
-                        .offset(x: CGFloat(t) * px)
-                }
+        let step = rulerStep(px: px)
+        let minor = step / 5
+        return ZStack(alignment: .topLeading) {
+            Color.clear.frame(height: 16)
+            // Minor ticks — one even baseline, so the ruler reads as a single line.
+            ForEach(0...Int(dur / minor), id: \.self) { i in
+                let t = Double(i) * minor
+                let isMajor = i % 5 == 0
+                Rectangle().fill(RC.ink.opacity(isMajor ? 0.35 : 0.16))
+                    .frame(width: 1, height: isMajor ? 8 : 4)
+                    .offset(x: CGFloat(t) * px, y: isMajor ? 8 : 12)
+            }
+            ForEach(0...Int(dur / step), id: \.self) { i in
+                let t = Double(i) * step
+                Text(String(format: "%d:%02d", Int(t) / 60, Int(t) % 60))
+                    .font(RC.mono(9.5))
+                    .foregroundStyle(RC.ink.opacity(0.32))
+                    .fixedSize()
+                    .offset(x: CGFloat(t) * px + 3, y: -3)
+            }
+            // In / out marks (edited time → raw x).
+            if let i = model.inPoint {
+                inOutMark(x: CGFloat(model.rawTime(fromEdited: i)) * px, label: "I")
+            }
+            if let o = model.outPoint {
+                inOutMark(x: CGFloat(model.rawTime(fromEdited: o)) * px, label: "O")
             }
         }
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-            model.scrub(to: Double(g.location.x / px))
+            model.scrub(to: model.editedTime(fromRaw: Double(g.location.x / px)))
         })
+    }
+
+    private func inOutMark(x: CGFloat, label: String) -> some View {
+        Text(label).font(RC.mono(8, weight: .bold)).foregroundStyle(RC.amberInk)
+            .frame(width: 12, height: 12)
+            .background(RC.amber, in: RoundedRectangle(cornerRadius: 3))
+            .offset(x: x - 6, y: 2)
     }
 
     private func zoomTrack(px: CGFloat) -> some View {
@@ -592,15 +754,51 @@ struct EditorTimeline: View {
 
             let inX = CGFloat(model.state.trimIn) * px
             let outX = CGFloat(model.state.trimOut) * px
+
+            // Pieces (kept spans split at blade points): click to select, ⌫ to remove.
+            ForEach(Array(model.pieces.enumerated()), id: \.offset) { i, piece in
+                let x = CGFloat(piece.lowerBound) * px
+                let w = CGFloat(piece.upperBound - piece.lowerBound) * px
+                Rectangle().fill(Color.clear)
+                    .frame(width: max(2, w), height: 52)
+                    .contentShape(Rectangle())
+                    .overlay(RoundedRectangle(cornerRadius: 4)
+                        .stroke(model.selectedPieceIndex == i ? RC.amber : .clear, lineWidth: 2)
+                        .padding(1))
+                    .offset(x: x)
+                    .onTapGesture {
+                        model.selectedPieceIndex = (model.selectedPieceIndex == i) ? nil : i
+                        model.selectedSegmentID = nil
+                    }
+            }
+            // Blade lines.
+            ForEach(Array(model.state.splits.enumerated()), id: \.offset) { _, sp in
+                Rectangle().fill(RC.ink.opacity(0.85)).frame(width: 2, height: 52)
+                    .offset(x: CGFloat(sp) * px - 1)
+                    .allowsHitTesting(false)
+            }
+            // In→out shading (edited → raw x).
+            if let i = model.inPoint, let o = model.outPoint, o > i {
+                let ix = CGFloat(model.rawTime(fromEdited: i)) * px
+                let ox = CGFloat(model.rawTime(fromEdited: o)) * px
+                Rectangle().fill(RC.amber.opacity(0.18)).frame(width: max(0, ox - ix), height: 52)
+                    .offset(x: ix).allowsHitTesting(false)
+            }
+
             Rectangle().fill(RC.base.opacity(0.72)).frame(width: max(0, inX), height: 52)
+                .allowsHitTesting(false)
             Rectangle().fill(RC.base.opacity(0.72))
                 .frame(width: max(0, px * dur - outX), height: 52)
-                .offset(x: outX)
+                .offset(x: outX).allowsHitTesting(false)
 
-            ForEach(Array(model.silenceCutsPreview.enumerated()), id: \.offset) { _, cut in
-                let x = CGFloat(cut.lowerBound + model.state.trimIn) * px
+            // Every removed span (auto + manual), hatched; click to bring it back.
+            ForEach(Array(model.effectiveCuts.enumerated()), id: \.offset) { _, cut in
+                let x = CGFloat(cut.lowerBound) * px
                 let cw = CGFloat(cut.upperBound - cut.lowerBound) * px
                 CutColumn().frame(width: max(6, cw), height: 52).offset(x: x)
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.restoreCut(cut) }
+                    .help("Click to keep this part")
             }
 
             trimHandle(at: inX, leading: true, px: px)
@@ -632,7 +830,7 @@ struct EditorTimeline: View {
     }
 
     private func playhead(px: CGFloat) -> some View {
-        let x = 12 + CGFloat(model.currentTime) * px
+        let x = 12 + CGFloat(model.playheadRaw) * px
         return VStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 3).fill(RC.ink).frame(width: 10, height: 8)
             Rectangle().fill(RC.ink).frame(width: 2)
@@ -654,7 +852,7 @@ struct ZoomBlockView: View {
 
     var body: some View {
         let selected = model.selectedSegmentID == seg.id
-        let x = CGFloat(seg.start + model.state.trimIn) * px
+        let x = CGFloat(model.rawTime(fromEdited: seg.start)) * px
         let w = max(26, CGFloat(seg.duration) * px)
 
         ZStack {
@@ -679,8 +877,9 @@ struct ZoomBlockView: View {
         .offset(x: x, y: 2)
         .onTapGesture {
             model.selectedSegmentID = seg.id
+            model.selectedPieceIndex = nil
             // Scrub to just before activation so the target box maps over a (near) rest camera.
-            model.scrub(to: max(0, seg.start + model.state.trimIn - 0.6))
+            model.scrub(to: max(0, seg.start - 0.6))
         }
         .gesture(
             DragGesture()

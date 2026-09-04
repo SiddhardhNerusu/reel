@@ -11,7 +11,8 @@ enum PreviewComposition {
                      document: ReelDocument,
                      tracks: RenderTracks,
                      compositor: Compositor,
-                     outputSize: CGSize) async throws -> AVVideoComposition {
+                     outputSize: CGSize,
+                     editedTimeline: Bool = false) async throws -> AVVideoComposition {
         let project = document.project
         let sourceSize = project.geometry.sourceSize
         let trimIn = project.trimIn
@@ -22,8 +23,9 @@ enum PreviewComposition {
         // Non-deprecated async factory (the appendix's `init(asset:applyingCIFiltersWithHandler:)`
         // is deprecated on macOS 15 in favor of the completion-handler form — appendix drift, §5.6).
         let comp = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
-            // compositionTime is on the raw-movie timeline; project time subtracts trimIn.
-            let t = request.compositionTime.seconds - trimIn
+            // Raw asset: composition time is raw-movie time, project time subtracts trimIn.
+            // Edited composition (kept spans spliced together): composition time IS project time.
+            let t = editedTimeline ? request.compositionTime.seconds : request.compositionTime.seconds - trimIn
             let clamped = max(0, t)
             let cam = camera.state(at: clamped)
             let frame = Compositor.Frame(camera: cam, cursor: cursor.point(at: clamped),

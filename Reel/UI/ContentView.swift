@@ -1,12 +1,58 @@
 import ScreenCaptureKit
 import SwiftUI
 
+/// One window (owner feedback): the launcher swaps to the editor in place, with a Back button.
+struct RootView: View {
+    @EnvironmentObject private var coordinator: RecordingCoordinator
+
+    var body: some View {
+        Group {
+            if let doc = coordinator.editorDoc {
+                EditorHost(doc: doc) { coordinator.editorDoc = nil }
+                    .id(doc.url)
+                    .background(WindowSizer(size: CGSize(width: 1440, height: 880), resizable: true))
+            } else {
+                ContentView()
+                    .background(WindowSizer(size: CGSize(width: 800, height: 640), resizable: false))
+            }
+        }
+    }
+}
+
+/// Owns the EditorModel for the life of one editing session.
+private struct EditorHost: View {
+    @StateObject private var model: EditorModel
+    let onBack: () -> Void
+    init(doc: ReelDocument, onBack: @escaping () -> Void) {
+        _model = StateObject(wrappedValue: EditorModel(doc: doc))
+        self.onBack = onBack
+    }
+    var body: some View { EditorView(model: model, onBack: onBack) }
+}
+
+/// Resizes the hosting window when the root swaps between launcher (fixed) and editor (min 1280×800).
+private struct WindowSizer: NSViewRepresentable {
+    let size: CGSize
+    let resizable: Bool
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let w = view.window else { return }
+            if resizable { w.styleMask.insert(.resizable) } else { w.styleMask.remove(.resizable) }
+            let current = w.contentView?.frame.size ?? .zero
+            if abs(current.width - size.width) > 2 || abs(current.height - size.height) > 2 {
+                w.setContentSize(size)
+                w.center()
+            }
+        }
+    }
+}
+
 /// The Darkroom launcher (IMPLEMENTATION_BRIEF §2.1/§2.2, artboards 1a/1b).
 /// 800×~620 fixed, hidden titlebar, one decision: what to record.
 struct ContentView: View {
     @EnvironmentObject private var coordinator: RecordingCoordinator
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.openWindow) private var openWindow
     @State private var displays: [SCDisplay] = []
     @State private var windows: [SCWindow] = []
     @State private var selectedDisplayID: CGDirectDisplayID?
@@ -287,7 +333,7 @@ struct ContentView: View {
             SectionCaps(text: "Recent")
             VStack(spacing: 2) {
                 ForEach(recents.prefix(4)) { rec in RecentRow(rec: rec, openAction: {
-                    openWindow(value: rec.url)
+                    if let doc = try? ReelDocument.open(rec.url) { coordinator.editorDoc = doc }
                 }, deleteAction: {
                     try? FileManager.default.trashItem(at: rec.url, resultingItemURL: nil)
                     refreshRecents()
@@ -437,8 +483,8 @@ private struct RecentRow: View {
             }
             Spacer()
             HStack(spacing: 16) {
-                actionText("Open", color: RC.ink3, hoverColor: RC.amber, action: openAction)
-                actionText("Reveal", color: RC.ink3, hoverColor: RC.amber) {
+                actionText("Edit", color: RC.ink3, hoverColor: RC.amber, action: openAction)
+                actionText("Show in Finder", color: RC.ink3, hoverColor: RC.amber) {
                     NSWorkspace.shared.activateFileViewerSelecting([rec.url])
                 }
                 actionText("Delete", color: RC.ink3, hoverColor: RC.live, action: deleteAction)
