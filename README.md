@@ -55,6 +55,19 @@ Tests/         SP-10
 Scaffold → SP-10 green → SP-0…SP-6 in ReelSpikes → M1 capture → M2 events → M3 auto-zoom
 (the moat) → M4 polish → M5 export suite → M6 editor → M7 dist/licensing → M8 launch.
 
+## Regenerating the project
+
+Run `scripts/gen.sh` — never bare `xcodegen generate`. XcodeGen recreates
+`Reel.xcodeproj` *including* `project.xcworkspace`, which wipes the setting that
+points Xcode's DerivedData at `build/DerivedData`. Without it Xcode builds a
+SECOND `Reel.app` with the same bundle id, and macOS starts binding Screen
+Recording / Accessibility grants to whichever copy it saw last — the permission
+card then reappears forever. The wrapper regenerates, restores the setting, and
+deletes any stray `~/Library/Developer/Xcode/DerivedData/Reel-*`.
+
+Invariant: **exactly one `Reel.app` on disk.** Check with
+`mdfind "kMDItemCFBundleIdentifier == 'com.neeklabs.Reel'"`.
+
 ## Dev signing (stable TCC identity)
 
 macOS ties Screen Recording / Accessibility grants to the app's code-signing
